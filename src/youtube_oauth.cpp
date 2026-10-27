@@ -276,10 +276,12 @@ std::string google_error(const json& payload, std::string fallback) {
 Client::Client(std::filesystem::path token_file) : token_file_{std::move(token_file)} {}
 
 bool Client::connected() const {
+    std::scoped_lock lk{mu_};
     return load_refresh_token(token_file_).has_value();
 }
 
 Result Client::start(std::string client_id, uint16_t callback_port) {
+    std::scoped_lock lk{mu_};
     if (client_id.empty()) return {false, "Enter a Google OAuth Desktop client ID first."};
     if (callback_port == 0) return {false, "The local HTTP server is not ready."};
     auto state = random_token(32);
@@ -312,6 +314,7 @@ Result Client::start(std::string client_id, uint16_t callback_port) {
 }
 
 Result Client::complete(std::string_view query) {
+    std::scoped_lock lk{mu_};
     auto params = parse_query(query);
     const auto state = params.find("state");
     if (pending_state_.empty() || state == params.end() || state->second != pending_state_) {
@@ -361,6 +364,7 @@ Result Client::complete(std::string_view query) {
 
 std::optional<std::vector<Playlist>> Client::list_owned_playlists(std::string_view client_id,
                                                                    std::string& error) const {
+    std::scoped_lock lk{mu_};
     auto refresh = load_refresh_token(token_file_);
     if (!refresh) {
         error = "Connect your YouTube account first.";
@@ -432,6 +436,7 @@ std::optional<std::vector<Playlist>> Client::list_owned_playlists(std::string_vi
 }
 
 void Client::disconnect() noexcept {
+    std::scoped_lock lk{mu_};
     DeleteFileW(token_file_.c_str());
     pending_state_.clear();
     pending_verifier_.clear();

@@ -61,9 +61,22 @@ struct LocalFilesConfig {
                                                "aac", "wma",  "aiff", "aif", "m3u", "m3u8"};
 };
 
+// One frozen queue entry saved into a station. `id` is the provider-specific
+// handle (YouTube watch URL, Jellyfin item id) and the metadata is what the
+// queue had at save time.
+struct SavedTrack {
+    std::string id;
+    std::string title;
+    std::string artist;
+    std::string album;
+    std::string image_tag; // Jellyfin cover tag; unused by YouTube
+    std::uint64_t duration_ms = 0;
+};
+
 struct YouTubeStation {
     std::string name;
     std::string url;
+    std::vector<SavedTrack> tracks; // used when url is empty (saved queue)
 };
 
 struct YouTubeMusicConfig {
@@ -80,6 +93,7 @@ struct JellyfinStation {
     std::string name;
     std::string playlist_id;
     bool use_favorites = false;
+    std::vector<SavedTrack> tracks; // used when playlist_id is empty (saved queue)
 };
 
 struct JellyfinConfig {

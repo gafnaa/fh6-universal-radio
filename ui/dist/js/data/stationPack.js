@@ -14,7 +14,8 @@ export function buildStationPack(cfg) {
 
 /**
  * Merges a station pack into the current config, skipping stations whose
- * `url` already exists so importing twice doesn't create duplicates.
+ * `url` already exists so importing twice doesn't create duplicates. Saved
+ * queue stations have no URL, so they dedupe by name instead.
  * @returns {{ patch: object, added: number }}
  */
 export function mergeStationPack(cfg, pack) {
@@ -23,8 +24,13 @@ export function mergeStationPack(cfg, pack) {
     for (const section of PACK_SECTIONS) {
         const existing = cfg?.[section]?.stations || [];
         const incoming = Array.isArray(pack?.[section]?.stations) ? pack[section].stations : [];
-        const existingUrls = new Set(existing.map(s => s.url));
-        const fresh = incoming.filter(s => s?.url && !existingUrls.has(s.url));
+        const existingUrls = new Set(existing.map(s => s.url).filter(Boolean));
+        const existingNames = new Set(existing.map(s => s.name));
+        const fresh = incoming.filter(s => {
+            if (!s) return false;
+            if (s.url) return !existingUrls.has(s.url);
+            return Array.isArray(s.tracks) && s.tracks.length > 0 && !existingNames.has(s.name);
+        });
         added += fresh.length;
         patch[section] = { stations: [...existing, ...fresh] };
     }

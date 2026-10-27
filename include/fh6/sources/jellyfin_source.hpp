@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fh6/audio_source.hpp"
+#include "fh6/background_worker.hpp"
 #include "fh6/config.hpp"
 #include "fh6/playback_dsp.hpp"
 #include "fh6/ring_buffer.hpp"
@@ -61,23 +62,32 @@ public:
     std::string active_station_name() const;
 
     struct QueueEntry {
-        std::size_t index;
+        std::size_t index = 0;
+        std::string id;
         std::string title;
         std::string artist;
         std::string album;
+        std::string image_tag;
+        std::uint64_t duration_ms = 0;
     };
     struct QueueSnapshot {
-        std::size_t cursor;
+        std::size_t cursor = 0;
         std::vector<QueueEntry> entries;
+        bool scanning = false;
+        std::string error;
     };
     struct QueueStatus {
-        std::size_t cursor;
-        std::size_t size;
+        std::size_t cursor = 0;
+        std::size_t size = 0;
+        bool scanning = false;
+        std::string error;
     };
 
     QueueSnapshot queue_snapshot() const;
     QueueStatus queue_status() const;
     bool jump_to(std::size_t index);
+    bool move_queue_entry(std::size_t from, std::size_t to);
+    bool remove_queue_entry(std::size_t index);
 
     // POST /api/source/jellyfin/cast: swap to a specific playlist id.
     // Returns false if the fetch fails (queue left untouched).
@@ -96,7 +106,10 @@ private:
     struct Pipe;
 
     // mu_ held.
-    bool refresh_queue_locked(); // releases mu_ across the HTTP fetch, re-acquires to swap
+    bool ensure_queue_locked();  // true when ready; false while a background fetch runs
+    std::string queue_key_locked() const;
+    void invalidate_queue_locked();
+    void sync_play_state_locked();
     std::unique_ptr<Pipe> spawn_pipe_locked(std::size_t for_idx);
     void start_pipe_locked();
     void stop_pipe_locked();
@@ -116,6 +129,11 @@ private:
     std::string target_playlist_; // one-off casting
     std::vector<JellyfinTrack> queue_;
     std::size_t current_idx_ = 0;
+    std::string queue_built_for_;
+    std::uint64_t queue_request_gen_ = 0;
+    bool queue_scanning_             = false;
+    std::string queue_error_;
+    BackgroundWorker resolver_{"jellyfin-queue"};
     std::unique_ptr<Pipe> pipe_;
     std::unique_ptr<Pipe> prefetch_;
     std::atomic<PlaybackState> state_{PlaybackState::stopped};

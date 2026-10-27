@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fh6/audio_source.hpp"
+#include "fh6/background_worker.hpp"
 #include "fh6/config.hpp"
 #include "fh6/worker/worker_client.hpp"
 #include "fh6/playback_dsp.hpp"
@@ -61,17 +62,26 @@ public:
         std::string artist;
     };
     struct QueueSnapshot {
-        std::size_t cursor;
+        std::size_t cursor = 0;
         std::vector<QueueEntry> entries;
+        bool scanning = false;
+        std::string error;
     };
     struct QueueStatus {
-        std::size_t cursor;
-        std::size_t size;
+        std::size_t cursor = 0;
+        std::size_t size = 0;
+        bool scanning = false;
+        std::string error;
     };
 
     QueueSnapshot queue_snapshot() const;
     QueueStatus queue_status() const;
     bool jump_to(std::size_t index);
+
+    // Edit the upcoming part of the queue (indices after the cursor). The
+    // current track is never moved or removed.
+    bool move_queue_entry(std::size_t from, std::size_t to);
+    bool remove_queue_entry(std::size_t index);
 
     TrackInfo current_track() const override;
     PlaybackState playback_state() const noexcept override {
@@ -94,17 +104,20 @@ private:
     void start_pipe_locked(); // (re)spawn pipe_ for queue_[queue_idx_]
     void stop_pipe_locked();  // drop pipe_ only
     void discard_prefetch_locked() noexcept;
-    void resolve_queue_locked(); // populates queue_ from target_url_
+    bool ensure_queue_locked(); // true when the queue is ready; false while scanning
     std::size_t next_queue_idx_locked() const noexcept;
     bool promote_prefetch_locked(std::size_t expected_idx);
     void maybe_spawn_prefetch_locked(); // called from pump() once current is healthy
     void drain_title_pipe_locked(Pipe* p);
+    void invalidate_queue_locked();
+    void sync_play_state_locked();
 
     YouTubeMusicConfig cfg_;
     std::filesystem::path ffmpeg_path_;
     worker::WorkerClient* worker_;
     std::unique_ptr<Pipe> pipe_;
     std::unique_ptr<Pipe> prefetch_; // pre-spawned next-track pipeline (or null)
+    BackgroundWorker resolver_{"yt-queue"};
 
     const YouTubeStation* active_station_locked() const noexcept;
 
@@ -119,6 +132,9 @@ private:
     std::vector<InternalQueueEntry> queue_; // canonical watch URLs in playback order
     std::size_t queue_idx_ = 0;
     std::string queue_built_for_; // value of target_url_ when queue_ was resolved
+    std::uint64_t queue_request_gen_ = 0;
+    bool queue_scanning_             = false;
+    std::string queue_error_;
     std::atomic<uint64_t> position_ms_{0};
     int consecutive_failed_ = 0; // tracks-in-a-row that produced 0 PCM bytes
     AuthState auth_         = AuthState::none_required;

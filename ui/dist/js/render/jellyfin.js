@@ -66,7 +66,7 @@ export function createJellyfin(main, ctx) {
             getCoverUrl: track => track.cover_url,
             getSearchFields: track => [track.title || "", track.artist || ""],
         },
-        getSig: details => `${details?.queue_size ?? -1}|${details?.queue_cursor ?? -1}`,
+        getSig: details => `${details?.queue_size ?? -1}|${details?.queue_cursor ?? -1}|${details?.queue_scanning ? 1 : 0}|${details?.queue_error ?? ""}`,
         onAir: async () => {
             await api.switchSource("jellyfin");
             await api.transport("jellyfin", "play");
@@ -85,7 +85,7 @@ export function createJellyfin(main, ctx) {
         },
     });
 
-    const { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, searchInput, trackList } = station.els;
+    const { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, saveQueueBtn, searchInput, trackList } = station.els;
 
     const card = el("section", { class: "card", id: "jellyfin-card", hidden: true }, [
         el("h2", { dataset: { i18n: "jellyfin.title" } }, t("jellyfin.title")),
@@ -99,7 +99,7 @@ export function createJellyfin(main, ctx) {
             el("div", { class: "row editor-foot" }, [castBtn, saveBtn]),
         ]),
         el("div", { class: "queue" }, [
-            el("div", { class: "queue-head row" }, [el("label", { class: "field-label", dataset: { i18n: "label.queue" } }, t("label.queue")), queueCount, shuffleBtn]),
+            el("div", { class: "queue-head row" }, [el("label", { class: "field-label", dataset: { i18n: "label.queue" } }, t("label.queue")), queueCount, saveQueueBtn, shuffleBtn]),
             searchInput,
             trackList,
         ]),
@@ -111,8 +111,15 @@ export function createJellyfin(main, ctx) {
 
     saveBtn.addEventListener("click", async () => {
         if (station.cur()) {
-            station.cur().playlist_id = idInput.value.trim();
-            station.cur().use_favorites = favCheck.checked;
+            const nextId = idInput.value.trim();
+            const nextFav = favCheck.checked;
+            const changed = station.cur().playlist_id !== nextId ||
+                station.cur().use_favorites !== nextFav;
+            // Turning a saved-queue station back into a live playlist drops
+            // the frozen snapshot.
+            if (changed) station.cur().tracks = [];
+            station.cur().playlist_id = nextId;
+            station.cur().use_favorites = nextFav;
         }
         try {
             await station.save();

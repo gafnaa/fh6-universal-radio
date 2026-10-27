@@ -1180,6 +1180,27 @@ bool LocalFileSource::jump_to(std::size_t index) {
     return true;
 }
 
+bool LocalFileSource::move_queue_entry(std::size_t from, std::size_t to) {
+    std::scoped_lock lk{mu_};
+    if (from >= playlist_.size() || to >= playlist_.size()) return false;
+    // Only the upcoming part is editable; the current track stays put.
+    if (from <= cursor_ || to <= cursor_) return false;
+    if (from == to) return true;
+    auto entry = std::move(playlist_[from]);
+    playlist_.erase(playlist_.begin() + static_cast<std::ptrdiff_t>(from));
+    playlist_.insert(playlist_.begin() + static_cast<std::ptrdiff_t>(to), std::move(entry));
+    discard_prefetch_locked();
+    return true;
+}
+
+bool LocalFileSource::remove_queue_entry(std::size_t index) {
+    std::scoped_lock lk{mu_};
+    if (index >= playlist_.size() || index <= cursor_) return false;
+    playlist_.erase(playlist_.begin() + static_cast<std::ptrdiff_t>(index));
+    discard_prefetch_locked();
+    return true;
+}
+
 AuthState LocalFileSource::auth_state() const noexcept {
     std::scoped_lock lk{mu_};
     const LocalStation* st = active_station_locked();

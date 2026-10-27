@@ -12,6 +12,7 @@ Config ConfigStore::snapshot() const {
 }
 
 void ConfigStore::patch(const std::function<void(Config&)>& mutator) {
+    std::scoped_lock commit_lk{commit_mu_};
     Config copy;
     std::vector<Observer> obs;
     {
@@ -33,6 +34,7 @@ void ConfigStore::patch(const std::function<void(Config&)>& mutator) {
 }
 
 void ConfigStore::reload() {
+    std::scoped_lock commit_lk{commit_mu_};
     Config copy;
     std::vector<Observer> obs;
     {

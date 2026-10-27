@@ -61,7 +61,7 @@
   "now_playing.previous": "Précédent",
   "now_playing.next": "Suivant",
 
-  "source.title": "SOURCE",
+  "source.title": "Sources audio",
   "source.no_source": "Aucune source configurée",
   "source.local_files": "Fichiers locaux",
   "source.online_radio": "Radio en ligne",

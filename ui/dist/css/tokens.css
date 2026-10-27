@@ -1,0 +1,90 @@
+:root {
+  color-scheme: dark light;
+  --space-3xs: 4px;
+  --space-2xs: 8px;
+  --space-xs: 12px;
+  --space-sm: 16px;
+  --space-md: 20px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 40px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.5rem;
+  --text-display-s: 2rem;
+  --text-display: 3rem;
+  --text-section: 1.25rem;
+  --text-title: 1rem;
+  --text-lead: 1.125rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-micro: 120ms;
+  --dur-short: 200ms;
+  --dur-long: 320ms;
+
+  --color-error: oklch(66% 0.18 27);
+  --color-success: oklch(74% 0.13 150);
+  --color-paper: oklch(14% 0.008 88);
+  --color-paper-2: oklch(18% 0.008 88);
+  --color-paper-3: oklch(22% 0.01 88);
+  --color-ink: oklch(94% 0.006 88);
+  --color-ink-2: oklch(78% 0.008 88);
+  --color-muted: oklch(67% 0.008 88);
+  --color-rule: oklch(30% 0.008 88);
+  --color-accent: oklch(88% 0.18 96);
+  --color-accent-ink: oklch(16% 0.012 88);
+  --color-focus: oklch(94% 0.18 96);
+  --accent: var(--color-accent);
+  --color-sunset-yellow: var(--color-accent);
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: var(--font-display);
+  --display-weight: 700;
+  --tracking-display: -0.025em;
+
+  --container: 1360px;
+  --gutter: 32px;
+  --gap-columns: 24px;
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-sticky-nav: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+
+  --radius-card: 16px;
+  --radius-input: 8px;
+  --radius-progress: 2px;
+  --radius-pill: 999px;
+  --rule-hair: 1px;
+  --shadow-card: 0 1px 2px oklch(8% 0.005 88 / 0.25);
+}
+
+body.theme-light {
+  color-scheme: light;
+  --color-paper: oklch(96% 0.005 88);
+  --color-paper-2: oklch(99% 0.005 88);
+  --color-paper-3: oklch(92% 0.006 88);
+  --color-ink: oklch(18% 0.008 88);
+  --color-ink-2: oklch(34% 0.008 88);
+  --color-muted: oklch(46% 0.008 88);
+  --color-rule: oklch(83% 0.008 88);
+  --color-accent: oklch(72% 0.16 90);
+  --color-accent-ink: oklch(17% 0.01 88);
+  --color-focus: oklch(65% 0.17 90);
+  --color-error: oklch(54% 0.18 27);
+  --color-success: oklch(48% 0.13 150);
+  --accent: var(--color-accent);
+  --color-sunset-yellow: var(--color-accent);
+  --shadow-card: 0 1px 2px oklch(20% 0.005 88 / 0.06);
+}

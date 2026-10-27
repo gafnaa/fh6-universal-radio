@@ -298,12 +298,11 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         return 0;
     }
 
-    // PCM mode. Pre-zero so a mid-callback underrun leaves silence in the
-    // tail, not the stale floats FMOD handed us.
-    std::memset(out_buf, 0, total * sizeof(float));
-
+    // PCM mode. A zero gain must silence the whole callback. Otherwise each
+    // produced frame is written below and only an underrun tail needs clearing.
     const float gain = b->gain();
     if (gain <= 0.0f) {
+        std::memset(out_buf, 0, total * sizeof(float));
         stats();
         return 0;
     }
@@ -320,7 +319,8 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     int16_t scratch[kChunkFrames * 2];
     auto& ring = b->mgr_.ring();
 
-    for (uint32_t produced = 0; produced < length;) {
+    uint32_t produced = 0;
+    for (; produced < length;) {
         const uint32_t want_frames = std::min(length - produced, kChunkFrames);
         const std::size_t got      = ring.read(scratch, want_frames * 4);
         const auto got_frames      = static_cast<uint32_t>(got / 4);
@@ -347,6 +347,12 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
             b->underruns_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
+    }
+
+    if (produced < length) {
+        const std::size_t remaining = static_cast<std::size_t>(length - produced) * out_ch;
+        std::memset(out_buf + static_cast<std::size_t>(produced) * out_ch, 0,
+                    remaining * sizeof(float));
     }
 
     stats();

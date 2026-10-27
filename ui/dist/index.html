@@ -4,8 +4,9 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="description" content="Choose a radio source, manage playback, and control music for Forza Horizon 6." />
 
-    <link rel="icon" type="image/png" href="../assets/default_artwork_128.png">
+    <link rel="icon" type="image/png" href="assets/default_artwork_128.png">
     <title>FH6 Universal Radio</title>
 
     <link rel="stylesheet" href="css/styles.css" />
@@ -26,7 +27,7 @@
     <section class="hero" id="np-art">
         <div class="hero-backdrop" id="np-backdrop" aria-hidden="true"></div>
         <div class="hero-inner">
-            <div class="cover" aria-hidden="true"><img id="np-art-img" alt="" /></div>
+            <div class="cover" aria-hidden="true"><img id="np-art-img" src="assets/default_artwork_2048.png" alt="" fetchpriority="high" decoding="async" /></div>
             <div class="now-title" id="np-title" data-i18n="now_playing.nothing_playing">Nothing playing</div>
             <div class="now-artist" id="np-artist"></div>
             <div class="progress">
@@ -45,7 +46,7 @@
         </div>
     </section>
 
-    <main>
+    <main class="dashboard">
         <section class="card" id="source-card" hidden>
             <h2 data-i18n="source.title">Source</h2>
             <div class="sources" id="sources"></div>
@@ -63,7 +64,7 @@
 
     <div class="mini-player" id="mini-player">
         <div class="mini-player-info">
-            <img class="mini-cover" id="mini-art-img" src="" alt="" />
+            <img class="mini-cover" id="mini-art-img" src="assets/default_artwork_128.png" alt="" />
             <div class="mini-player-text">
                 <div class="mini-title" id="mini-title">Nothing playing</div>
                 <div class="mini-artist" id="mini-artist"></div>
@@ -104,7 +105,7 @@
 
     <footer class="credits">
         <p class="credit-line">
-            <strong>FH6 Universal Radio</strong> &mdash; an open-source mod by
+            <strong>FH6 Universal Radio</strong>, an open source mod by
             <a href="https://github.com/g0ldyy" target="_blank" rel="noopener noreferrer">g0ldyy</a>
             and
             <a href="https://github.com/g0ldyy/fh6-universal-radio/graphs/contributors" target="_blank"

@@ -79,7 +79,7 @@
   "now_playing.next": "Next",
 
   // ─── Sources list ───────────────────────────────────────────────────────
-  "source.title": "SOURCE",
+  "source.title": "Sources",
   "source.no_source": "No source configured",
   "source.local_files": "Local Files",
   "source.online_radio": "Online Radio",

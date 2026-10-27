@@ -594,7 +594,6 @@ bool ExternalAudioSource::restart_current() {
 void ExternalAudioSource::pump(RingBuffer& ring) {
     if (state_.load(std::memory_order_acquire) != PlaybackState::playing) return;
 
-    std::vector<int16_t> chunk;
     {
         std::scoped_lock lk{queue_mu_};
         std::size_t available = pcm_queue_.size() - queue_offset_;
@@ -616,20 +615,17 @@ void ExternalAudioSource::pump(RingBuffer& ring) {
         writable_samples             &= ~std::size_t{1};
         const std::size_t to_write    = std::min(available, writable_samples);
         if (to_write > 0) {
-            chunk.assign(pcm_queue_.begin() + static_cast<std::ptrdiff_t>(queue_offset_),
-                         pcm_queue_.begin() +
-                             static_cast<std::ptrdiff_t>(queue_offset_ + to_write));
-            queue_offset_ += to_write;
+            const std::size_t bytes = to_write * sizeof(int16_t);
+            const std::size_t written = ring.write(pcm_queue_.data() + queue_offset_, bytes);
+            const std::size_t written_samples = written / sizeof(int16_t);
+            queue_offset_ += written_samples;
+            if (written_samples > 0) {
+                const auto frames = static_cast<uint64_t>(written_samples / kTargetChannels);
+                position_ms_.fetch_add((frames * 1000u) / kTargetSampleRate,
+                                       std::memory_order_acq_rel);
+            }
         }
         compact_queue_locked();
-    }
-
-    if (!chunk.empty()) {
-        const std::size_t bytes = chunk.size() * sizeof(int16_t);
-        if (ring.write(chunk.data(), bytes) == bytes) {
-            const auto frames = static_cast<uint64_t>(chunk.size() / kTargetChannels);
-            position_ms_.fetch_add((frames * 1000u) / kTargetSampleRate, std::memory_order_acq_rel);
-        }
     }
 }
 

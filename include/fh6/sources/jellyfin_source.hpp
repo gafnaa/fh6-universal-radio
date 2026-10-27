@@ -70,8 +70,13 @@ public:
         std::size_t cursor;
         std::vector<QueueEntry> entries;
     };
+    struct QueueStatus {
+        std::size_t cursor;
+        std::size_t size;
+    };
 
     QueueSnapshot queue_snapshot() const;
+    QueueStatus queue_status() const;
     bool jump_to(std::size_t index);
 
     // POST /api/source/jellyfin/cast: swap to a specific playlist id.

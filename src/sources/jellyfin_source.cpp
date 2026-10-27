@@ -579,6 +579,11 @@ JellyfinSource::QueueSnapshot JellyfinSource::queue_snapshot() const {
     return snap;
 }
 
+JellyfinSource::QueueStatus JellyfinSource::queue_status() const {
+    std::scoped_lock lk{mu_};
+    return {current_idx_, queue_.size()};
+}
+
 bool JellyfinSource::jump_to(std::size_t index) {
     std::scoped_lock lk{mu_};
     if (index >= queue_.size()) return false;

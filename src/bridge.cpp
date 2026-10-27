@@ -150,6 +150,9 @@ void run_bridge(HMODULE self) noexcept {
         log::warn("[bridge] some FMOD signatures unresolved -- DSP injection disabled");
     }
 
+    // Sources keep a non-owning WorkerClient pointer, so declare the worker
+    // before the manager to make it outlive source teardown.
+    auto worker = std::make_shared<worker::WorkerClient>();
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
 
@@ -161,7 +164,6 @@ void run_bridge(HMODULE self) noexcept {
     // Worker process: delegates CreateProcess calls to a small external exe
     // so the fork() Wine performs is cheap (~5 MB) instead of copying the
     // game's multi-GB page table.  Falls back to direct spawn if absent.
-    auto worker = std::make_shared<worker::WorkerClient>();
     {
         auto worker_exe = data_dir / "fh6-radio-worker.exe";
         if (!std::filesystem::exists(worker_exe))

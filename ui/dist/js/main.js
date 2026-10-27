@@ -312,9 +312,9 @@ $("#save-config").addEventListener("click", async () => {
 
         if (enabled && img?.complete && img?.naturalWidth) {
             const color = extractDominantColor(img);
-            if (color) document.documentElement.style.setProperty("--accent", color);
+            if (color) document.body.style.setProperty("--accent", color);
         } else if (!enabled) {
-            document.documentElement.style.setProperty("--accent", "var(--color-sunset-yellow)");
+            document.body.style.setProperty("--accent", "var(--color-sunset-yellow)");
         }
 
     } catch (e) {

@@ -115,6 +115,7 @@ Config load_config(const std::filesystem::path& path) {
     cfg.youtube_music.enabled          = pick<bool>(ym, "enabled", cfg.youtube_music.enabled);
     cfg.youtube_music.cookies_path     = pick_path(ym, "cookies_path");
     cfg.youtube_music.yt_dlp_path      = pick_path(ym, "yt_dlp_path");
+    cfg.youtube_music.oauth_client_id = pick<std::string>(ym, "oauth_client_id", "");
     cfg.youtube_music.active_station   = pick<std::string>(ym, "active_station", "");
     cfg.youtube_music.shuffle          = pick<bool>(ym, "shuffle", cfg.youtube_music.shuffle);
 
@@ -400,6 +401,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("enabled", cfg.youtube_music.enabled);
     e.kv_path("cookies_path", cfg.youtube_music.cookies_path);
     e.kv_path("yt_dlp_path", cfg.youtube_music.yt_dlp_path);
+    e.kv("oauth_client_id", cfg.youtube_music.oauth_client_id);
     e.kv("active_station", cfg.youtube_music.active_station);
     e.kv("shuffle", cfg.youtube_music.shuffle);
     for (const auto& st : cfg.youtube_music.stations) {

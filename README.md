@@ -17,7 +17,7 @@ An open-source radio mod for **Forza Horizon 6**. Adds a new in-game radio stati
 
 - **Local files**: build named **stations** from one or more folders, exclude subfolders you don't want, and pick a play order (shuffle / albums / name / folder) with repeat modes and a searchable queue. MP3 / FLAC / WAV / OGG / M4A / AAC / OPUS / WMA / M3U / M3U8 etc.
 - **Online radio**: search a directory of thousands of internet stations by name, genre, or country (via [radio-browser.info](https://www.radio-browser.info)) or paste any stream URL; save favourites with logos and genre/bitrate badges, with live track info.
-- **YouTube Music**: paste any video, playlist, or YT Music URL from the dashboard. Tracks are added to a searchable queue, with support for saving playlists as reusable stations.
+- **YouTube Music**: paste any video, playlist, or YT Music URL from the dashboard. Sign in to YouTube to discover playlists you own and import them as reusable stations.
 - **Spotify Connect**: cast from the Spotify app to an "FH6 Universal Radio" device (requires Spotify Premium).
 - **Jellyfin**: stream playlists from your own Jellyfin server, view queued tracks, and save playlists as stations for quick access later.
 - **External audio**: capture any Windows app (Deezer, a browser tab...) and pipe it into the radio through a virtual audio cable.
@@ -51,7 +51,9 @@ To manage them yourself instead, set the paths in the dashboard (**Settings > Yo
 
 ### YouTube Music
 
-Private/age-restricted content needs a Netscape `cookies.txt` exported from your browser. Use an extension like **Get cookies.txt LOCALLY** to export it.
+To discover playlists you created, enable [YouTube Data API v3](https://developers.google.com/youtube/v3/getting-started) in a Google Cloud project and create a [Desktop app OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app). Enter its client ID in **Settings > YouTube Music > Google OAuth Desktop client ID**, enable YouTube Music, then choose **Connect Google account** and **Find my playlists** in the dashboard. The sign-in asks for read-only YouTube access, and the refresh token is protected with Windows DPAPI.
+
+Playlist discovery lists playlists owned by the signed-in account using YouTube's `mine=true` API filter. Imported stations continue to use the existing `yt-dlp` playback path. Private/age-restricted content may still need a Netscape `cookies.txt` exported from your browser; use an extension like **Get cookies.txt LOCALLY** to export it.
 
 ### Spotify Connect
 

@@ -75,6 +75,7 @@ export const SCHEMA = () => [
             ["enabled", t("schema.enabled"), "checkbox"],
             ["cookies_path", t("schema.youtube_music.cookies_path"), "text"],
             ["yt_dlp_path", t("schema.youtube_music.yt_dlp_path"), "text"],
+            ["oauth_client_id", t("schema.youtube_music.oauth_client_id"), "text"],
         ],
     ],
     [

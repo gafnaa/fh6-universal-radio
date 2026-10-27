@@ -27,11 +27,16 @@ namespace fh6::http {
 //
 //   POST /api/source/youtube_music/cast     body {"url":"..."}
 //   POST /api/source/youtube_music/shuffle  body {"shuffle":true|false}
+//   GET  /api/source/youtube_music/oauth/status
+//   POST /api/source/youtube_music/oauth/start
+//   GET  /api/source/youtube_music/oauth/playlists  playlists owned by the signed-in user
+//   POST /api/source/youtube_music/oauth/import    body {"playlist_ids":[...]}
 //   GET  /api/source/youtube_music/stations
 //   PUT  /api/source/youtube_music/stations body {"stations":[...],"active_station":"..."}
 //   POST /api/source/youtube_music/activate body {"name":"..."}
 //   GET  /api/source/youtube_music/queue
 //   POST /api/source/youtube_music/play     body {"index":N}
+//   POST /api/source/youtube_music/oauth/disconnect
 //
 //   POST /api/source/online_radio/cast      body {"url":"...", ...}
 //
@@ -64,7 +69,8 @@ namespace fh6::http {
 class HttpServer {
 public:
     HttpServer(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigStore& cfg,
-               uint16_t port, std::filesystem::path ui_dist, DependencyManager& deps);
+               uint16_t port, std::filesystem::path ui_dist, DependencyManager& deps,
+               std::filesystem::path data_dir);
     ~HttpServer();
 
     HttpServer(const HttpServer&)            = delete;

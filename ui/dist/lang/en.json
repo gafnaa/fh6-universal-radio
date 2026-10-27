@@ -233,6 +233,22 @@
   "youtube_music.default_station_name": "My Playlist",
   "youtube_music.saved_stations": "Saved YouTube Music stations",
   "youtube_music.shuffle": "Shuffle",
+  "youtube_music.account_playlists": "Your YouTube playlists",
+  "youtube_music.oauth_setup": "Add a Google OAuth Desktop client ID in Settings → YouTube Music. Enable YouTube Data API v3 for that Google project.",
+  "youtube_music.oauth_ready": "Sign-in opens a browser on the PC running FH6 Universal Radio.",
+  "youtube_music.connect_google": "Connect Google account",
+  "youtube_music.connected": "YouTube account connected",
+  "youtube_music.not_connected": "No YouTube account connected",
+  "youtube_music.sign_in_pending": "Finish sign-in in the browser on the game PC…",
+  "youtube_music.find_playlists": "Find my playlists",
+  "youtube_music.loading_playlists": "Loading your playlists…",
+  "youtube_music.playlists_found": "Found {count} playlists you created",
+  "youtube_music.no_playlists": "No playlists were found for this account.",
+  "youtube_music.playlist_item_count": "{count} videos",
+  "youtube_music.selected_count": "{count} selected",
+  "youtube_music.import_selected": "Import selected",
+  "youtube_music.disconnect": "Disconnect account",
+  "youtube_music.imported_playlists": "Imported {count} playlists",
 
   // ─── Jellyfin card ──────────────────────────────────────────────────────
   "jellyfin.title": "Jellyfin",
@@ -285,6 +301,7 @@
 
   "schema.youtube_music.cookies_path": "cookies.txt (optional)",
   "schema.youtube_music.yt_dlp_path": "yt-dlp path (optional)",
+  "schema.youtube_music.oauth_client_id": "Google OAuth Desktop client ID",
   "schema.youtube_music.shuffle": "Shuffle",
 
   "schema.jellyfin.server_url": "Server URL",

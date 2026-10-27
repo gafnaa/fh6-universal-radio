@@ -53,6 +53,13 @@ export const api = {
 		...sourceApi("youtube_music"),
 		cast: url => request("/api/source/youtube_music/cast", { method: "POST", body: { url } }),
 		shuffle: shuffle => request("/api/source/youtube_music/shuffle", { method: "POST", body: { shuffle } }),
+		oauthStatus: () => request("/api/source/youtube_music/oauth/status"),
+		oauthStart: () => request("/api/source/youtube_music/oauth/start", { method: "POST" }),
+		oauthDisconnect: () => request("/api/source/youtube_music/oauth/disconnect", { method: "POST" }),
+		ownedPlaylists: () => request("/api/source/youtube_music/oauth/playlists"),
+		importOwnedPlaylists: playlistIds => request("/api/source/youtube_music/oauth/import", {
+			method: "POST", body: { playlist_ids: playlistIds },
+		}),
 	},
 
 	// Jellyfin

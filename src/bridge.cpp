@@ -371,7 +371,7 @@ void run_bridge(HMODULE self) noexcept {
     // Re-resolve binary paths into the live sources once a download lands.
     deps.start([&store, &apply_config] { apply_config(store.snapshot()); });
 
-    http::HttpServer http{mgr, bridge, store, cfg.general.port, ui_dir, deps};
+    http::HttpServer http{mgr, bridge, store, cfg.general.port, ui_dir, deps, data_dir};
     log::info("[bridge] running on port {}", cfg.general.port);
 
     for (;;) Sleep(60'000);

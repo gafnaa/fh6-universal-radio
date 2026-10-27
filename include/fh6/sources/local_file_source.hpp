@@ -62,6 +62,8 @@ public:
     void set_active_station(std::string name);
     void reshuffle();
     bool jump_to(std::size_t index);
+    bool move_queue_entry(std::size_t from, std::size_t to) override;
+    bool remove_queue_entry(std::size_t index) override;
     void set_ffmpeg_path(std::filesystem::path p);
     void set_playback_options(const PlaybackConfig& opts) override;
 

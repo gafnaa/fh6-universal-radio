@@ -26,6 +26,10 @@ function sourceApi(name) {
 			request(`/api/source/${name}/activate`, { method: "POST", body: { name: stationName } }),
 		getQueue: () => request(`/api/source/${name}/queue`),
 		playIndex: index => request(`/api/source/${name}/play`, { method: "POST", body: { index } }),
+		moveQueueItem: (from, to) =>
+			request(`/api/source/${name}/queue/move`, { method: "POST", body: { from, to } }),
+		removeQueueItem: index =>
+			request(`/api/source/${name}/queue/remove`, { method: "POST", body: { index } }),
 	};
 }
 
@@ -53,6 +57,8 @@ export const api = {
 		...sourceApi("youtube_music"),
 		cast: url => request("/api/source/youtube_music/cast", { method: "POST", body: { url } }),
 		shuffle: shuffle => request("/api/source/youtube_music/shuffle", { method: "POST", body: { shuffle } }),
+		saveQueueAsStation: name =>
+			request("/api/source/youtube_music/queue/save", { method: "POST", body: { name } }),
 		oauthStatus: () => request("/api/source/youtube_music/oauth/status"),
 		oauthStart: () => request("/api/source/youtube_music/oauth/start", { method: "POST" }),
 		oauthDisconnect: () => request("/api/source/youtube_music/oauth/disconnect", { method: "POST" }),
@@ -68,5 +74,7 @@ export const api = {
 		cast: (playlistId, useFavorites) =>
 			request("/api/source/jellyfin/cast", { method: "POST", body: { playlist_id: playlistId, use_favorites: useFavorites } }),
 		shuffle: shuffle => request("/api/source/jellyfin/shuffle", { method: "POST", body: { shuffle } }),
+		saveQueueAsStation: name =>
+			request("/api/source/jellyfin/queue/save", { method: "POST", body: { name } }),
 	},
 };

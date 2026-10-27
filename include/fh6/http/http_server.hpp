@@ -15,8 +15,9 @@ class DSPBridge;
 
 namespace fh6::http {
 
-// Loopback-wildcard HTTP server (raw Winsock, single accept loop). All
-// routes are CORS-enabled.
+// Loopback-wildcard HTTP server (raw Winsock, small worker pool). All routes
+// are CORS-enabled. Expensive work (playlist scans, OAuth, Jellyfin fetches)
+// runs off the accept loop so dashboard controls stay responsive.
 //
 //   GET  /api/state                       unified live state
 //   GET  /api/events                      SSE stream of /api/state snapshots
@@ -34,13 +35,20 @@ namespace fh6::http {
 //   GET  /api/source/youtube_music/stations
 //   PUT  /api/source/youtube_music/stations body {"stations":[...],"active_station":"..."}
 //   POST /api/source/youtube_music/activate body {"name":"..."}
-//   GET  /api/source/youtube_music/queue
+//   GET  /api/source/youtube_music/queue    cursor/scanning/error/tracks
+//   POST /api/source/youtube_music/queue/move   body {"from":N,"to":N}
+//   POST /api/source/youtube_music/queue/remove body {"index":N}
+//   POST /api/source/youtube_music/queue/save   body {"name":"..."} (saved station)
 //   POST /api/source/youtube_music/play     body {"index":N}
 //   POST /api/source/youtube_music/oauth/disconnect
 //
 //   POST /api/source/online_radio/cast      body {"url":"...", ...}
 //
 //   POST /api/source/jellyfin/cast          body {"playlist_id":"..."}
+//   GET  /api/source/jellyfin/queue         cursor/scanning/error/tracks
+//   POST /api/source/jellyfin/queue/move    body {"from":N,"to":N}
+//   POST /api/source/jellyfin/queue/remove  body {"index":N}
+//   POST /api/source/jellyfin/queue/save    body {"name":"..."} (saved station)
 //
 //   GET  /api/external_audio/devices
 //   PUT  /api/external_audio/config
@@ -52,6 +60,8 @@ namespace fh6::http {
 //   PUT  /api/source/local_files/stations body {"stations":[...],"active_station":"..."}
 //   POST /api/source/local_files/activate body {"name":"..."} (switch source + play)
 //   GET  /api/source/local_files/queue    {"cursor":N,"tracks":[{index,title,folder}]}
+//   POST /api/source/local_files/queue/move   body {"from":N,"to":N}
+//   POST /api/source/local_files/queue/remove body {"index":N}
 //   POST /api/source/local_files/play     body {"index":N}
 //   POST /api/source/local_files/reshuffle
 //   POST /api/source/local_files/rescan   re-scan the active station

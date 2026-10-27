@@ -39,6 +39,12 @@ export function createStationManager(cfg) {
     const renameBtn = el("button", { type: "button", class: "btn ghost", dataset: { i18n: "btn.rename" } }, t("btn.rename"));
     const deleteBtn = el("button", { type: "button", class: "btn ghost danger", dataset: { i18n: "btn.delete" } }, t("btn.delete"));
     const queueCount = el("span", { class: "muted" });
+    const saveQueueBtn = typeof cfg.api.saveQueueAsStation === "function"
+        ? el("button", {
+            type: "button", class: "btn ghost", dataset: { i18n: "queue.save_station" },
+            title: t("queue.save_station"),
+        }, t("queue.save_station"))
+        : null;
     const searchInput = el("input", {
         type: "text",
         placeholder: t("label.search_playlist_placeholder"),
@@ -88,9 +94,21 @@ export function createStationManager(cfg) {
     }
 
     function renderQueue() {
-        queueCount.textContent = `${queue.tracks?.length || 0} ${t("label.tracks")}`;
+        const count = queue.tracks?.length || 0;
+        let countText = `${count} ${t("label.tracks")}`;
+        if (queue.scanning) countText += ` · ${t("label.queue_scanning")}`;
+        queueCount.textContent = countText;
+        queueCount.title = queue.error || "";
+        const canEdit = typeof cfg.api.moveQueueItem === "function" &&
+            typeof cfg.api.removeQueueItem === "function";
         renderTrackQueue(trackList, queue, search, {
             ...cfg.queue,
+            onMoveTrack: canEdit
+                ? (track, to) => editQueue(() => cfg.api.moveQueueItem(track.index, to))
+                : undefined,
+            onRemoveTrack: canEdit
+                ? track => editQueue(() => cfg.api.removeQueueItem(track.index))
+                : undefined,
             onTrackClick: async track => {
                 try {
                     await cfg.api.playIndex(track.index);
@@ -101,6 +119,20 @@ export function createStationManager(cfg) {
                 }
             },
         });
+    }
+
+    let queueBusy = false;
+    async function editQueue(action) {
+        if (queueBusy) return;
+        queueBusy = true;
+        try {
+            await action();
+            await loadQueue();
+        } catch (e) {
+            toast(e.message, true);
+        } finally {
+            queueBusy = false;
+        }
     }
 
     // --- Station CRUD --------------------------------------------------------
@@ -208,6 +240,29 @@ export function createStationManager(cfg) {
     }
     onAirBtn.addEventListener("click", setOnAir);
 
+    if (saveQueueBtn) {
+        saveQueueBtn.addEventListener("click", async () => {
+            if (!queue.tracks?.length) return toast(t("label.queue_empty"), true);
+            const suggested = t("queue.save_default", { name: cur()?.name || t(cfg.defaultNameKey) });
+            const name = await promptInput({
+                title: t("queue.save_title"),
+                value: suggested,
+            });
+            if (!name) return;
+            saveQueueBtn.disabled = true;
+            try {
+                const result = await cfg.api.saveQueueAsStation(name);
+                toast(t("queue.saved", { name: result.name || name }));
+                await cfg.ctx?.onSaved?.();
+                await load(true); // include the new station in the local list
+            } catch (e) {
+                toast(e.message, true);
+            } finally {
+                saveQueueBtn.disabled = false;
+            }
+        });
+    }
+
     // --- Sync with backend live state on each render() tick ------------------
     function sync(details, extra) {
         const liveActiveStation = details?.active_station;
@@ -228,7 +283,7 @@ export function createStationManager(cfg) {
     }
 
     return {
-        els: { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, searchInput, trackList },
+        els: { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, saveQueueBtn, searchInput, trackList },
         cur,
         getActiveStation: () => activeStation,
         load,

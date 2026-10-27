@@ -47,7 +47,7 @@ describe("createLocalFiles", () => {
     lf.render();
     expect(document.getElementById("local-files-card").hidden).toBe(false);
     await new Promise(r => setTimeout(r, 0));
-    const opts = document.getElementById("lf-station").querySelectorAll("option");
+    const opts = document.querySelectorAll("#local-files-card .stationbar select option");
     expect(opts.length).toBe(1);
     expect(opts[0].textContent).toContain("My Music");
     expect(global.fetch).toHaveBeenCalledWith(

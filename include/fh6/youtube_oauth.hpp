@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +36,9 @@ public:
     void disconnect() noexcept;
 
 private:
+    // HTTP workers may inspect/refresh OAuth state concurrently with the
+    // dashboard's status poll; serialise the file and pending-flow state.
+    mutable std::mutex mu_;
     std::filesystem::path token_file_;
     std::string pending_state_;
     std::string pending_verifier_;

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -37,6 +38,35 @@ std::string watch_url_for_id(std::string_view id) {
     std::string s = "https://www.youtube.com/watch?v=";
     s.append(id);
     return s;
+}
+
+struct ResolvedTrack {
+    std::string url;
+    std::string title;
+    std::string artist;
+    std::size_t original_index = 0;
+};
+
+struct ResolveResult {
+    std::vector<ResolvedTrack> tracks;
+    std::string error;
+};
+
+std::string saved_station_key(const YouTubeStation& station) {
+    return "\x01saved:" + station.name;
+}
+
+bool same_youtube_station(const YouTubeStation& a, const YouTubeStation& b) {
+    if (a.name != b.name || a.url != b.url || a.tracks.size() != b.tracks.size()) return false;
+    for (std::size_t i = 0; i < a.tracks.size(); ++i) {
+        const auto& x = a.tracks[i];
+        const auto& y = b.tracks[i];
+        if (x.id != y.id || x.title != y.title || x.artist != y.artist ||
+            x.album != y.album || x.image_tag != y.image_tag ||
+            x.duration_ms != y.duration_ms)
+            return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -81,7 +111,15 @@ YouTubeMusicSource::YouTubeMusicSource(YouTubeMusicConfig cfg, std::filesystem::
                                        worker::WorkerClient* worker)
     : cfg_{std::move(cfg)}, ffmpeg_path_{std::move(ffmpeg_path)}, worker_{worker} {}
 
-YouTubeMusicSource::~YouTubeMusicSource() { stop_pipe_locked(); }
+YouTubeMusicSource::~YouTubeMusicSource() {
+    {
+        std::scoped_lock lk{mu_};
+        invalidate_queue_locked();
+        discard_prefetch_locked();
+        stop_pipe_locked();
+    }
+    resolver_.stop();
+}
 
 const YouTubeStation* YouTubeMusicSource::active_station_locked() const noexcept {
     if (cfg_.stations.empty()) return nullptr;
@@ -93,25 +131,25 @@ const YouTubeStation* YouTubeMusicSource::active_station_locked() const noexcept
 void YouTubeMusicSource::set_config(YouTubeMusicConfig cfg) {
     {
         std::scoped_lock lk{mu_};
-        const auto* old_st = active_station_locked();
-        std::string old_url = old_st ? old_st->url : "";
-        
+        std::optional<YouTubeStation> old_station;
+        if (const auto* st = active_station_locked()) old_station = *st;
+
         // preserve resolved path
         if (cfg.yt_dlp_path.empty() && !cfg_.yt_dlp_path.empty()) {
             cfg.yt_dlp_path = cfg_.yt_dlp_path;
         }
 
         cfg_ = std::move(cfg);
-        
-        const auto* new_st = active_station_locked();
-        std::string new_url = new_st ? new_st->url : "";
-        
-        if (old_url != new_url && target_url_.empty()) {
+
+        const auto* new_station = active_station_locked();
+        const bool station_changed =
+            static_cast<bool>(old_station) != static_cast<bool>(new_station) ||
+            (old_station && new_station && !same_youtube_station(*old_station, *new_station));
+
+        if (target_url_.empty() && station_changed) {
+            invalidate_queue_locked();
             discard_prefetch_locked();
             stop_pipe_locked();
-            queue_.clear();
-            queue_idx_ = 0;
-            queue_built_for_.clear();
         }
     }
 }
@@ -121,11 +159,9 @@ void YouTubeMusicSource::set_active_station(std::string name) {
     if (cfg_.active_station == name && target_url_.empty()) return;
     cfg_.active_station = std::move(name);
     target_url_.clear(); // clear temporary cast target
+    invalidate_queue_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
-    queue_.clear();
-    queue_idx_ = 0;
-    queue_built_for_.clear();
 }
 
 std::size_t YouTubeMusicSource::station_count() const noexcept {
@@ -152,18 +188,20 @@ bool YouTubeMusicSource::initialize() {
 }
 
 void YouTubeMusicSource::shutdown() noexcept {
-    std::scoped_lock lk{mu_};
-    discard_prefetch_locked();
-    stop_pipe_locked();
+    {
+        std::scoped_lock lk{mu_};
+        invalidate_queue_locked();
+        discard_prefetch_locked();
+        stop_pipe_locked();
+    }
+    resolver_.stop();
 }
 
 void YouTubeMusicSource::set_target(std::string url) {
     std::scoped_lock lk{mu_};
     target_url_ = std::move(url);
     // Invalidate queue so the next play() re-resolves against the new URL.
-    queue_.clear();
-    queue_idx_ = 0;
-    queue_built_for_.clear();
+    invalidate_queue_locked();
     discard_prefetch_locked();
 }
 
@@ -184,13 +222,7 @@ void YouTubeMusicSource::set_shuffle(bool shuffle) {
     // would now be playing the wrong track.
     discard_prefetch_locked();
 
-    std::string effective_url = target_url_;
-    if (effective_url.empty()) {
-        const auto* st = active_station_locked();
-        if (st) effective_url = st->url;
-    }
-
-    if (!queue_.empty() && queue_built_for_ == effective_url) {
+    if (!queue_.empty()) {
         // Re-shuffle or re-sort the remaining queue (preserve current track)
         if (shuffle) {
             static thread_local std::mt19937 rng{std::random_device{}()};
@@ -213,7 +245,9 @@ void YouTubeMusicSource::set_shuffle(bool shuffle) {
 YouTubeMusicSource::QueueSnapshot YouTubeMusicSource::queue_snapshot() const {
     std::scoped_lock lk{mu_};
     QueueSnapshot snap;
-    snap.cursor = queue_idx_;
+    snap.cursor   = queue_idx_;
+    snap.scanning = queue_scanning_;
+    snap.error    = queue_error_;
     snap.entries.reserve(queue_.size());
     for (std::size_t i = 0; i < queue_.size(); ++i) {
         snap.entries.push_back({i, queue_[i].url, queue_[i].title, queue_[i].artist});
@@ -223,7 +257,7 @@ YouTubeMusicSource::QueueSnapshot YouTubeMusicSource::queue_snapshot() const {
 
 YouTubeMusicSource::QueueStatus YouTubeMusicSource::queue_status() const {
     std::scoped_lock lk{mu_};
-    return {queue_idx_, queue_.size()};
+    return {queue_idx_, queue_.size(), queue_scanning_, queue_error_};
 }
 
 bool YouTubeMusicSource::jump_to(std::size_t index) {
@@ -232,76 +266,82 @@ bool YouTubeMusicSource::jump_to(std::size_t index) {
     consecutive_failed_ = 0;
     queue_idx_ = index;
     if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    sync_play_state_locked();
     return true;
 }
 
-void YouTubeMusicSource::resolve_queue_locked() {
-    std::string effective_url = target_url_;
-    if (effective_url.empty()) {
-        const auto* st = active_station_locked();
-        if (st) effective_url = st->url;
-    }
+bool YouTubeMusicSource::move_queue_entry(std::size_t from, std::size_t to) {
+    std::scoped_lock lk{mu_};
+    if (from >= queue_.size() || to >= queue_.size()) return false;
+    // Only the upcoming part is editable; the current track stays put.
+    if (from <= queue_idx_ || to <= queue_idx_) return false;
+    if (from == to) return true;
+    auto entry = std::move(queue_[from]);
+    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(from));
+    queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(to), std::move(entry));
+    discard_prefetch_locked();
+    return true;
+}
 
-    if (effective_url.empty()) {
-        queue_.clear();
-        queue_idx_ = 0;
-        queue_built_for_.clear();
-        return;
-    }
+bool YouTubeMusicSource::remove_queue_entry(std::size_t index) {
+    std::scoped_lock lk{mu_};
+    if (index >= queue_.size() || index <= queue_idx_) return false;
+    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(index));
+    discard_prefetch_locked();
+    return true;
+}
 
-    if (queue_built_for_ == effective_url && !queue_.empty()) return;
-
-    queue_.clear();
-    queue_idx_ = 0;
-
-    if (!is_playlist_url(effective_url)) {
-        // add a 0 at the end for the original_index
-        queue_.push_back({effective_url, "", "", 0}); 
-        queue_built_for_ = effective_url;
-        return;
-    }
-
-    // Playlist URL: enumerate IDs via --flat-playlist.
-    const auto yt  = cfg_.yt_dlp_path.empty() ? L"yt-dlp" : cfg_.yt_dlp_path.wstring();
+static ResolveResult fetch_flat_playlist(const YouTubeMusicConfig& cfg, const std::string& url,
+                                         worker::WorkerClient* worker) {
+    ResolveResult result;
+    const auto yt    = cfg.yt_dlp_path.empty() ? L"yt-dlp" : cfg.yt_dlp_path.wstring();
     std::wstring cmd = quote(yt) + L" --ignore-config --no-warnings --flat-playlist --skip-download "
                                    L"--encoding UTF-8 "
                                    L"--print \"%(id)s\t%(title)s\" ";
-    if (!cfg_.cookies_path.empty())
-        cmd += L"--cookies " + quote(cfg_.cookies_path.wstring()) + L" ";
-    cmd += L"-- " + quote(widen(effective_url));
+    if (!cfg.cookies_path.empty())
+        cmd += L"--cookies " + quote(cfg.cookies_path.wstring()) + L" ";
+    cmd += L"-- " + quote(widen(url));
 
     // Prefer the worker (no fork of the game process); fall back to a direct
     // spawn when it's absent or returns nothing.
     std::string raw;
-    if (worker_ && worker_->alive()) raw = worker_->run_capture(cmd);
+    if (worker && worker->alive()) raw = worker->run_capture(cmd);
 
     if (raw.empty()) {
         HANDLE job = create_kill_on_close_job();
         if (!job) {
-            log::warn("[yt] resolve_queue: CreateJobObject failed ({})", GetLastError());
-            return;
+            result.error = "Could not start the playlist scan (CreateJobObject failed).";
+            return result;
         }
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
         HANDLE rd = nullptr, wr = nullptr;
-        if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) { CloseHandle(job); return; }
+        if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) {
+            CloseHandle(job);
+            result.error = "Could not start the playlist scan (CreatePipe failed).";
+            return result;
+        }
         SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
         HANDLE nul_in  = open_nul(GENERIC_READ);
         HANDLE err_log = open_stderr_log();
-        HANDLE proc = spawn_in_job(job, cmd, nul_in, wr, err_log);
+        HANDLE proc    = spawn_in_job(job, cmd, nul_in, wr, err_log);
         const DWORD ec_yt = proc ? 0u : GetLastError();
         CloseHandle(wr);
-        if (nul_in)  CloseHandle(nul_in);
+        if (nul_in) CloseHandle(nul_in);
         if (err_log) CloseHandle(err_log);
         if (!proc) {
-            CloseHandle(rd); CloseHandle(job);
+            CloseHandle(rd);
+            CloseHandle(job);
             log::warn("[yt] resolve_queue: failed to launch yt-dlp -- {}",
-                      describe_launch_failure(std::wstring{yt}, ec_yt, !cfg_.yt_dlp_path.empty()));
-            return;
+                      describe_launch_failure(std::wstring{yt}, ec_yt, !cfg.yt_dlp_path.empty()));
+            result.error = "Could not launch yt-dlp. Check the yt-dlp path in Settings.";
+            return result;
         }
         raw = drain_to_eof(rd);
-        CloseHandle(rd); CloseHandle(proc); CloseHandle(job);
+        CloseHandle(rd);
+        CloseHandle(proc);
+        CloseHandle(job);
     }
+
     std::size_t og_idx = 0;
     for (std::size_t pos = 0; pos < raw.size();) {
         auto nl   = raw.find('\n', pos);
@@ -310,32 +350,140 @@ void YouTubeMusicSource::resolve_queue_locked() {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
             line.pop_back();
         if (!line.empty() && line != "NA") {
-            const auto tab = line.find('\t');
+            const auto tab       = line.find('\t');
             const std::string id = tab == std::string::npos ? line : line.substr(0, tab);
             if (!id.empty() && id != "NA") {
                 const std::string title =
                     tab == std::string::npos ? std::string{} : line.substr(tab + 1);
-                
-                // add og_idx++ to the end of the push_back
-                queue_.push_back({watch_url_for_id(id), title, "", og_idx++}); 
+                result.tracks.push_back({watch_url_for_id(id), title, "", og_idx++});
             }
         }
         pos = (nl == std::string::npos) ? raw.size() : nl + 1;
     }
 
-    if (cfg_.shuffle && queue_.size() > 1) {
-        static thread_local std::mt19937 rng{std::random_device{}()};
-        std::shuffle(queue_.begin(), queue_.end(), rng);
-    }
-
-    queue_built_for_ = effective_url;
-    if (queue_.empty() && is_playlist_url(effective_url)) {
+    if (result.tracks.empty()) {
         log::warn("[yt] resolved 0 tracks from {} -- check {} for yt-dlp errors "
                   "(private/deleted/geo-blocked playlist?)",
-                  effective_url, stderr_log_path().string());
+                  url, stderr_log_path().string());
+        result.error = "No tracks were found. Check the URL, cookies, and yt-dlp log.";
     } else {
-        log::info("[yt] resolved {} track(s) from {}", queue_.size(), effective_url);
+        log::info("[yt] resolved {} track(s) from {}", result.tracks.size(), url);
     }
+    return result;
+}
+
+void YouTubeMusicSource::invalidate_queue_locked() {
+    ++queue_request_gen_;
+    queue_scanning_ = false;
+    queue_error_.clear();
+    queue_.clear();
+    queue_idx_ = 0;
+    queue_built_for_.clear();
+    resolver_.cancel_pending();
+}
+
+bool YouTubeMusicSource::ensure_queue_locked() {
+    std::string effective_url = target_url_;
+    const YouTubeStation* station = nullptr;
+    if (effective_url.empty()) {
+        station = active_station_locked();
+        if (station) effective_url = station->url;
+    }
+
+    // A saved-queue station carries its own frozen list.
+    if (effective_url.empty() && station && !station->tracks.empty()) {
+        const std::string key = saved_station_key(*station);
+        if (queue_built_for_ == key) return true;
+        queue_.clear();
+        queue_idx_ = 0;
+        queue_error_.clear();
+        queue_scanning_ = false;
+        queue_.reserve(station->tracks.size());
+        for (std::size_t i = 0; i < station->tracks.size(); ++i) {
+            const auto& t = station->tracks[i];
+            queue_.push_back({t.id, t.title, t.artist, i});
+        }
+        queue_built_for_ = key;
+        return true;
+    }
+
+    if (effective_url.empty()) {
+        queue_.clear();
+        queue_idx_ = 0;
+        queue_built_for_.clear();
+        queue_error_.clear();
+        queue_scanning_ = false;
+        return true;
+    }
+
+    if (queue_built_for_ == effective_url) return true;
+    if (queue_scanning_) return false;
+
+    if (!is_playlist_url(effective_url)) {
+        queue_.clear();
+        queue_idx_ = 0;
+        queue_error_.clear();
+        queue_scanning_ = false;
+        queue_.push_back({effective_url, "", "", 0});
+        queue_built_for_ = effective_url;
+        return true;
+    }
+
+    // Kick a background yt-dlp scan. The HTTP worker and the audio pump keep
+    // running; the queue becomes available on a later tick.
+    queue_.clear();
+    queue_idx_ = 0;
+    queue_error_.clear();
+    queue_built_for_.clear();
+    discard_prefetch_locked();
+
+    const auto gen = ++queue_request_gen_;
+    queue_scanning_ = true;
+    YouTubeMusicConfig cfg = cfg_;
+    auto* worker           = worker_;
+    resolver_.submit([this, gen, effective_url, cfg = std::move(cfg), worker]() mutable {
+        auto result = fetch_flat_playlist(cfg, effective_url, worker);
+
+        std::scoped_lock lk{mu_};
+        if (gen != queue_request_gen_) return; // superseded by a newer target/config
+
+        queue_scanning_ = false;
+        if (!result.error.empty()) {
+            queue_error_ = std::move(result.error);
+            queue_built_for_ = effective_url; // don't retry on every pump tick
+            queue_.clear();
+            queue_idx_ = 0;
+            if (state_.load(std::memory_order_acquire) != PlaybackState::playing)
+                state_.store(PlaybackState::stopped, std::memory_order_release);
+            return;
+        }
+
+        queue_.clear();
+        queue_idx_ = 0;
+        queue_.reserve(result.tracks.size());
+        for (auto& t : result.tracks)
+            queue_.push_back({std::move(t.url), std::move(t.title), std::move(t.artist),
+                              t.original_index});
+        if (cfg_.shuffle && queue_.size() > 1) {
+            static thread_local std::mt19937 rng{std::random_device{}()};
+            std::shuffle(queue_.begin(), queue_.end(), rng);
+        }
+        queue_built_for_ = effective_url;
+        queue_error_.clear();
+        const auto st = state_.load(std::memory_order_acquire);
+        if ((st == PlaybackState::buffering || st == PlaybackState::playing) && !queue_.empty()) {
+            start_pipe_locked();
+            if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+        }
+    });
+    return false;
+}
+
+void YouTubeMusicSource::sync_play_state_locked() {
+    if (pipe_)
+        state_.store(PlaybackState::playing, std::memory_order_release);
+    else if (queue_scanning_)
+        state_.store(PlaybackState::buffering, std::memory_order_release);
 }
 
 std::unique_ptr<YouTubeMusicSource::Pipe>
@@ -477,7 +625,7 @@ YouTubeMusicSource::spawn_pipe_locked(std::string_view url, std::size_t for_idx)
 
 void YouTubeMusicSource::start_pipe_locked() {
     stop_pipe_locked();
-    resolve_queue_locked();
+    if (!ensure_queue_locked()) return; // scan running; state is set by the caller
     if (queue_.empty()) return;
     if (queue_idx_ >= queue_.size()) queue_idx_ = 0;
 
@@ -536,7 +684,7 @@ void YouTubeMusicSource::stop_pipe_locked() {
 void YouTubeMusicSource::play() {
     std::scoped_lock lk{mu_};
     if (!pipe_) start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    sync_play_state_locked();
 }
 
 void YouTubeMusicSource::pause() { state_.store(PlaybackState::paused, std::memory_order_release); }
@@ -564,6 +712,9 @@ bool YouTubeMusicSource::skip_next() {
 
 void YouTubeMusicSource::stop() {
     std::scoped_lock lk{mu_};
+    ++queue_request_gen_;
+    queue_scanning_ = false;
+    resolver_.cancel_pending();
     discard_prefetch_locked();
     stop_pipe_locked();
     target_url_.clear(); // allow falling back to active station next play
@@ -575,7 +726,7 @@ void YouTubeMusicSource::next() {
     consecutive_failed_ = 0; // user override clears the give-up state
     queue_idx_          = next_queue_idx_locked();
     if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    sync_play_state_locked();
 }
 
 void YouTubeMusicSource::previous() {
@@ -588,7 +739,7 @@ void YouTubeMusicSource::previous() {
     // Prefetch targets idx+1; previous() rewinds, so it's stale.
     discard_prefetch_locked();
     start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    sync_play_state_locked();
 }
 
 TrackInfo YouTubeMusicSource::current_track() const {

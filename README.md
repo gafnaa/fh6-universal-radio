@@ -15,11 +15,11 @@ An open-source radio mod for **Forza Horizon 6**. Adds a new in-game radio stati
 
 ## Features
 
-- **Local files**: build named **stations** from one or more folders, exclude subfolders you don't want, and pick a play order (shuffle / albums / name / folder) with repeat modes and a searchable queue. MP3 / FLAC / WAV / OGG / M4A / AAC / OPUS / WMA / M3U / M3U8 etc.
+- **Local files**: build named **stations** from one or more folders, exclude subfolders you don't want, and pick a play order (shuffle / albums / name / folder) with repeat modes and a searchable queue. Reorder or remove upcoming tracks from the dashboard. MP3 / FLAC / WAV / OGG / M4A / AAC / OPUS / WMA / M3U / M3U8 etc.
 - **Online radio**: search a directory of thousands of internet stations by name, genre, or country (via [radio-browser.info](https://www.radio-browser.info)) or paste any stream URL; save favourites with logos and genre/bitrate badges, with live track info.
-- **YouTube Music**: paste any video, playlist, or YT Music URL from the dashboard. Sign in to YouTube to discover playlists you own and import them as reusable stations.
+- **YouTube Music**: paste any video, playlist, or YT Music URL from the dashboard. Playlists are scanned in the background so the dashboard stays responsive, and you can reorder or remove upcoming tracks or save the current queue as a reusable station. Sign in to YouTube to discover playlists you own and import them as reusable stations.
 - **Spotify Connect**: cast from the Spotify app to an "FH6 Universal Radio" device (requires Spotify Premium).
-- **Jellyfin**: stream playlists from your own Jellyfin server, view queued tracks, and save playlists as stations for quick access later.
+- **Jellyfin**: stream playlists from your own Jellyfin server, view queued tracks, reorder or remove upcoming tracks, and save the queue as a station for quick access later.
 - **External audio**: capture any Windows app (Deezer, a browser tab...) and pipe it into the radio through a virtual audio cable.
 - **In-game radio integration**: audio is routed through FH6's radio bus, fades with menus and reacts to in-game volume like every other station.
 - **Live dashboard** at `http://localhost:8420`: switch source, transport controls, volume, settings.

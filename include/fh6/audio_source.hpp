@@ -2,6 +2,7 @@
 
 #include "fh6/ring_buffer.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -65,6 +66,12 @@ public:
     // ControlLoop's raceStartPlayback="restart" entry. Returns true iff
     // playback actually rewound to t=0. Default is "unsupported".
     virtual bool restart_current() { return false; }
+
+    // Dashboard queue editing. Sources that support a live queue override
+    // these; indices are positions in the queue snapshot exposed to the UI.
+    // The currently playing entry must not be moved or removed.
+    virtual bool move_queue_entry(std::size_t /*from*/, std::size_t /*to*/) { return false; }
+    virtual bool remove_queue_entry(std::size_t /*index*/) { return false; }
 
     // Pull PCM into the ring. Sources that push from their own thread no-op.
     virtual void pump(RingBuffer&) {}

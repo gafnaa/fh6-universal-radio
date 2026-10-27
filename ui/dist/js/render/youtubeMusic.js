@@ -85,7 +85,7 @@ export function createYoutubeMusic(main, ctx) {
             getCoverUrl: track => track.cover_url,
             getSearchFields: track => [track.title || "", track.url || ""],
         },
-        getSig: details => `${details?.queue_size ?? -1}|${details?.queue_cursor ?? -1}`,
+        getSig: details => `${details?.queue_size ?? -1}|${details?.queue_cursor ?? -1}|${details?.queue_scanning ? 1 : 0}|${details?.queue_error ?? ""}`,
         onAir: async () => {
             await api.switchSource("youtube_music");
             await api.transport("youtube_music", "play");
@@ -103,7 +103,7 @@ export function createYoutubeMusic(main, ctx) {
         },
     });
 
-    const { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, searchInput, trackList } = station.els;
+    const { stationSelect, onAirBtn, newBtn, duplicateBtn, renameBtn, deleteBtn, queueCount, saveQueueBtn, searchInput, trackList } = station.els;
 
     const card = el("section", { class: "card", id: "youtube-music-card", hidden: true }, [
         el("h2", { dataset: { i18n: "youtube_music.title" } }, t("youtube_music.title")),
@@ -127,7 +127,7 @@ export function createYoutubeMusic(main, ctx) {
             el("div", { class: "row editor-foot" }, [castBtn, saveBtn]),
         ]),
         el("div", { class: "queue" }, [
-            el("div", { class: "queue-head row" }, [el("label", { class: "field-label", dataset: { i18n: "label.queue" } }, t("label.queue")), queueCount, shuffleBtn]),
+            el("div", { class: "queue-head row" }, [el("label", { class: "field-label", dataset: { i18n: "label.queue" } }, t("label.queue")), queueCount, saveQueueBtn, shuffleBtn]),
             searchInput,
             trackList,
         ]),
@@ -138,7 +138,13 @@ export function createYoutubeMusic(main, ctx) {
     else main.append(card);
 
     saveBtn.addEventListener("click", async () => {
-        if (station.cur()) station.cur().url = urlInput.value.trim();
+        if (station.cur()) {
+            const nextUrl = urlInput.value.trim();
+            // Editing a saved-queue station into a playlist URL replaces its
+            // frozen snapshot with the live playlist.
+            if (station.cur().url !== nextUrl) station.cur().tracks = [];
+            station.cur().url = nextUrl;
+        }
         try {
             await station.save();
             toast(t("youtube_music.saved_stations"));

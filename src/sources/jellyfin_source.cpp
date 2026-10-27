@@ -37,9 +37,21 @@ bool config_complete(const JellyfinConfig& c) noexcept {
            (!c.stations.empty());
 }
 
+bool same_saved_tracks(const std::vector<SavedTrack>& a, const std::vector<SavedTrack>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto& x = a[i];
+        const auto& y = b[i];
+        if (x.id != y.id || x.title != y.title || x.artist != y.artist ||
+            x.album != y.album || x.image_tag != y.image_tag || x.duration_ms != y.duration_ms)
+            return false;
+    }
+    return true;
+}
+
 // Fields that determine which playlist gets fetched. `shuffle` deliberately
 // omitted -- it doesn't require a re-query.
-bool same_query_target(const JellyfinConfig& a, const JellyfinConfig& b) noexcept {
+bool same_query_target(const JellyfinConfig& a, const JellyfinConfig& b) {
     if (a.server_url != b.server_url || a.api_key != b.api_key || a.user_id != b.user_id)
         return false;
     auto get_target = [](const JellyfinConfig& c) {
@@ -47,7 +59,8 @@ bool same_query_target(const JellyfinConfig& a, const JellyfinConfig& b) noexcep
         return c.stations.empty() ? JellyfinStation{} : c.stations.front();
     };
     auto ta = get_target(a), tb = get_target(b);
-    return ta.playlist_id == tb.playlist_id && ta.use_favorites == tb.use_favorites;
+    return ta.name == tb.name && ta.playlist_id == tb.playlist_id &&
+           ta.use_favorites == tb.use_favorites && same_saved_tracks(ta.tracks, tb.tracks);
 }
 
 std::optional<std::string> http_get(const JellyfinConfig& cfg, const std::string& path) {
@@ -157,35 +170,36 @@ JellyfinSource::JellyfinSource(JellyfinConfig cfg, std::filesystem::path ffmpeg_
     : cfg_{std::move(cfg)}, ffmpeg_path_{std::move(ffmpeg_path)}, worker_{worker} {}
 
 JellyfinSource::~JellyfinSource() {
-    std::scoped_lock lk{mu_};
-    discard_prefetch_locked();
-    stop_pipe_locked();
+    {
+        std::scoped_lock lk{mu_};
+        invalidate_queue_locked();
+        discard_prefetch_locked();
+        stop_pipe_locked();
+    }
+    resolver_.stop();
 }
 
 bool JellyfinSource::initialize() {
     if (!cfg_.enabled) return false;
     if (!config_complete(cfg_)) return true; // tile visible; user can fill fields later
 
-    std::string target_id;
-    bool target_fav = false;
-    if (auto* st = active_station_locked()) {
-        target_id = st->playlist_id;
-        target_fav = st->use_favorites;
-    }
-
-    // Construction precedes registration -- no other thread holds a reference
-    // yet, so the fetch can run without locking.
-    if (auto tracks = fetch_tracks(cfg_, target_id, target_fav)) {
-        queue_ = std::move(*tracks);
-        if (cfg_.shuffle) shuffle_range(queue_, 0);
-    }
+    std::scoped_lock lk{mu_};
+    if (cfg_.active_station.empty() && !cfg_.stations.empty())
+        cfg_.active_station = cfg_.stations.front().name;
+    // Populate the queue without blocking startup; the scan runs on the
+    // resolver thread and the dashboard can already issue requests.
+    ensure_queue_locked();
     return true;
 }
 
 void JellyfinSource::shutdown() noexcept {
-    std::scoped_lock lk{mu_};
-    discard_prefetch_locked();
-    stop_pipe_locked();
+    {
+        std::scoped_lock lk{mu_};
+        invalidate_queue_locked();
+        discard_prefetch_locked();
+        stop_pipe_locked();
+    }
+    resolver_.stop();
 }
 
 std::unique_ptr<JellyfinSource::Pipe> JellyfinSource::spawn_pipe_locked(std::size_t for_idx) {
@@ -249,9 +263,141 @@ std::unique_ptr<JellyfinSource::Pipe> JellyfinSource::spawn_pipe_locked(std::siz
     return pipe;
 }
 
+std::string JellyfinSource::queue_key_locked() const {
+    if (!target_playlist_.empty()) {
+        if (target_playlist_ == "FAVORITES") return "\x01cast:favorites";
+        return "\x01cast:" + target_playlist_;
+    }
+    const JellyfinStation* st = active_station_locked();
+    if (!st) return {};
+    if (st->playlist_id.empty() && !st->use_favorites && !st->tracks.empty())
+        return "\x01saved:" + st->name;
+    if (st->use_favorites) return "\x01station:favorites:" + st->name;
+    if (st->playlist_id.empty()) return {};
+    return "\x01station:" + st->name + ":" + st->playlist_id;
+}
+
+void JellyfinSource::invalidate_queue_locked() {
+    ++queue_request_gen_;
+    queue_scanning_ = false;
+    queue_error_.clear();
+    queue_.clear();
+    current_idx_ = 0;
+    queue_built_for_.clear();
+    resolver_.cancel_pending();
+}
+
+bool JellyfinSource::ensure_queue_locked() {
+    if (queue_scanning_) return false;
+
+    const JellyfinStation* station = nullptr;
+    std::string target_id;
+    bool use_favs = false;
+
+    if (!target_playlist_.empty()) {
+        use_favs  = target_playlist_ == "FAVORITES";
+        target_id = use_favs ? std::string{} : target_playlist_;
+    } else if ((station = active_station_locked()) != nullptr) {
+        // A saved-queue station carries its own frozen list.
+        if (station->playlist_id.empty() && !station->use_favorites &&
+            !station->tracks.empty()) {
+            const std::string key = "\x01saved:" + station->name;
+            if (queue_built_for_ == key) return true;
+            queue_.clear();
+            current_idx_ = 0;
+            queue_error_.clear();
+            queue_scanning_ = false;
+            queue_.reserve(station->tracks.size());
+            for (std::size_t i = 0; i < station->tracks.size(); ++i) {
+                const auto& t = station->tracks[i];
+                queue_.push_back({t.id, t.title, t.artist, t.album, t.image_tag,
+                                  t.duration_ms, i});
+            }
+            queue_built_for_ = key;
+            return true;
+        }
+        target_id = station->playlist_id;
+        use_favs  = station->use_favorites;
+    }
+
+    if (!use_favs && target_id.empty()) {
+        queue_.clear();
+        current_idx_ = 0;
+        queue_built_for_.clear();
+        queue_error_.clear();
+        queue_scanning_ = false;
+        return true;
+    }
+
+    const std::string key = queue_key_locked();
+    if (queue_built_for_ == key) return true;
+
+    // Kick a background HTTP fetch. HTTP workers and the audio pump stay
+    // responsive; the queue becomes available on a later tick.
+    queue_.clear();
+    current_idx_ = 0;
+    queue_built_for_.clear();
+    queue_error_.clear();
+    discard_prefetch_locked();
+
+    const auto gen = ++queue_request_gen_;
+    queue_scanning_ = true;
+    JellyfinConfig cfg = cfg_;
+    resolver_.submit([this, gen, key, cfg = std::move(cfg), target_id,
+                      use_favs]() mutable {
+        std::optional<std::vector<JellyfinTrack>> tracks;
+        {
+            std::scoped_lock fetch_lk{fetch_serializer()};
+            tracks = fetch_tracks(cfg, target_id, use_favs);
+        }
+
+        std::scoped_lock lk{mu_};
+        if (gen != queue_request_gen_) return; // superseded by a newer target/config
+
+        queue_scanning_ = false;
+        if (!tracks) {
+            queue_error_ =
+                "Could not load the Jellyfin queue. Check the server URL, API key, and station.";
+            queue_built_for_ = key; // don't retry on every tick
+            queue_.clear();
+            current_idx_ = 0;
+            if (state_.load(std::memory_order_acquire) == PlaybackState::buffering)
+                state_.store(PlaybackState::stopped, std::memory_order_release);
+            return;
+        }
+
+        queue_ = std::move(*tracks);
+        current_idx_ = 0;
+        if (cfg_.shuffle && queue_.size() > 1) {
+            static thread_local std::mt19937 rng{std::random_device{}()};
+            std::shuffle(queue_.begin(), queue_.end(), rng);
+        }
+        queue_built_for_ = key;
+        queue_error_.clear();
+        const auto st = state_.load(std::memory_order_acquire);
+        if ((st == PlaybackState::buffering || st == PlaybackState::playing) &&
+            !queue_.empty()) {
+            start_pipe_locked();
+            if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+        }
+    });
+    return false;
+}
+
+void JellyfinSource::sync_play_state_locked() {
+    if (pipe_)
+        state_.store(PlaybackState::playing, std::memory_order_release);
+    else if (queue_scanning_)
+        state_.store(PlaybackState::buffering, std::memory_order_release);
+}
+
 void JellyfinSource::start_pipe_locked() {
     stop_pipe_locked();
+    if (!ensure_queue_locked()) return; // scan running; state is set by the caller
+    if (queue_.empty()) return;
+    if (current_idx_ >= queue_.size()) current_idx_ = 0;
     pipe_ = spawn_pipe_locked(current_idx_);
+    if (pipe_) state_.store(PlaybackState::buffering, std::memory_order_release);
 }
 
 void JellyfinSource::stop_pipe_locked() {
@@ -304,15 +450,17 @@ void JellyfinSource::advance_locked(std::ptrdiff_t step) {
 
 void JellyfinSource::play() {
     std::scoped_lock lk{mu_};
-    if (queue_.empty()) return; // cast()/set_config() will populate
     if (!pipe_) start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    sync_play_state_locked();
 }
 
 void JellyfinSource::pause() { state_.store(PlaybackState::paused, std::memory_order_release); }
 
 void JellyfinSource::stop() {
     std::scoped_lock lk{mu_};
+    ++queue_request_gen_;
+    queue_scanning_ = false;
+    resolver_.cancel_pending();
     discard_prefetch_locked();
     stop_pipe_locked();
     current_idx_ = 0;
@@ -328,90 +476,56 @@ void JellyfinSource::previous() {
 }
 
 bool JellyfinSource::cast(std::string playlist_id, bool use_favorites) {
-    // Build the fetch config from a fresh cfg_ snapshot + the cast target,
-    // then run the HTTP call with no class locks held.
-    JellyfinConfig snap;
-    {
-        std::scoped_lock lk{mu_};
-        snap = cfg_;
-    }
-    // for casting, only need to ensure the auth fields are filled out
-    if (snap.server_url.empty() || snap.api_key.empty() || snap.user_id.empty()) return false;
-
-    std::optional<std::vector<JellyfinTrack>> tracks;
-    {
-        std::scoped_lock fetch_lk{fetch_serializer()};
-        tracks = fetch_tracks(snap, playlist_id, use_favorites);
-    }
-    if (!tracks) return false;
-
     std::scoped_lock lk{mu_};
-    target_playlist_ = use_favorites ? "FAVORITES" : playlist_id;
-    queue_ = std::move(*tracks);
-    current_idx_ = 0;
-    if (cfg_.shuffle) shuffle_range(queue_, 0);
-    discard_prefetch_locked();  // stale: targets the old playlist
-    start_pipe_locked();
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    // Casting only requires the auth fields; the target is the playlist id.
+    if (cfg_.server_url.empty() || cfg_.api_key.empty() || cfg_.user_id.empty())
+        return false;
+
+    target_playlist_ = use_favorites ? "FAVORITES" : std::move(playlist_id);
+    invalidate_queue_locked();
+    discard_prefetch_locked();
+    stop_pipe_locked();
+    start_pipe_locked(); // kicks the background fetch and buffers
+    sync_play_state_locked();
     return true;
 }
 
 void JellyfinSource::set_config(JellyfinConfig cfg) {
-    // Decide what's actually changing under a brief lock; do the HTTP fetch
-    // with no class lock held; then commit under the lock again.
-    bool requery, shuffle_flip;
-    std::string target_id;
-    bool target_fav = false;
-    {
-        std::scoped_lock lk{mu_};
-        requery = !same_query_target(cfg_, cfg) && config_complete(cfg);
-        shuffle_flip = cfg_.shuffle != cfg.shuffle;
-        if (requery) {
-            target_playlist_.clear();
-            auto get_target = [](const JellyfinConfig& c) {
-                for (const auto& s : c.stations) if (s.name == c.active_station) return s;
-                return c.stations.empty() ? JellyfinStation{} : c.stations.front();
-            };
-            auto t = get_target(cfg);
-            target_id = t.playlist_id;
-            target_fav = t.use_favorites;
-        }
-    }
-
-    std::optional<std::vector<JellyfinTrack>> tracks;
-    if (requery) {
-        std::scoped_lock fetch_lk{fetch_serializer()};
-        tracks = fetch_tracks(cfg, target_id, target_fav);
-    }
-
     std::scoped_lock lk{mu_};
-    const bool was_playing = state_.load(std::memory_order_acquire) == PlaybackState::playing;
-    cfg_ = std::move(cfg);
 
-    if (tracks) {
+    const bool requery      = !same_query_target(cfg_, cfg);
+    const bool shuffle_flip = cfg_.shuffle != cfg.shuffle;
+
+    if (requery) {
+        const auto st       = state_.load(std::memory_order_acquire);
+        const bool resume   = st == PlaybackState::playing || st == PlaybackState::buffering;
+        cfg_                = std::move(cfg);
+        target_playlist_.clear();
+        invalidate_queue_locked();
         discard_prefetch_locked();
         stop_pipe_locked();
-        queue_ = std::move(*tracks);
-        current_idx_ = 0;
-        if (cfg_.shuffle) shuffle_range(queue_, 0);
-        if (was_playing) {
+        if (resume) {
             start_pipe_locked();
-            if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+            sync_play_state_locked();
         }
-    } else if (shuffle_flip) {
-        if (cfg_.shuffle) {
-            shuffle_range(queue_, current_idx_ + 1); // preserve the currently-playing track
-        } else if (!queue_.empty()) {
-            const std::size_t from =
-                (current_idx_ >= queue_.size()) ? queue_.size() : (current_idx_ + 1);
-            auto start = queue_.begin() + static_cast<std::ptrdiff_t>(from);
-            if (start < queue_.end()) {
-                std::sort(start, queue_.end(), [](const auto& a, const auto& b) {
-                    return a.original_index < b.original_index;
-                });
-            }
+        return;
+    }
+
+    cfg_ = std::move(cfg);
+    if (!shuffle_flip) return;
+
+    discard_prefetch_locked();
+    if (cfg_.shuffle) {
+        shuffle_range(queue_, current_idx_ + 1); // preserve the currently-playing track
+    } else if (!queue_.empty()) {
+        const std::size_t from =
+            (current_idx_ >= queue_.size()) ? queue_.size() : (current_idx_ + 1);
+        auto start = queue_.begin() + static_cast<std::ptrdiff_t>(from);
+        if (start < queue_.end()) {
+            std::sort(start, queue_.end(), [](const auto& a, const auto& b) {
+                return a.original_index < b.original_index;
+            });
         }
-        discard_prefetch_locked(); // next-idx URL just changed
     }
 }
 
@@ -459,7 +573,10 @@ AuthState JellyfinSource::auth_state() const noexcept {
 }
 
 void JellyfinSource::pump(RingBuffer& ring) {
-    if (state_.load(std::memory_order_acquire) != PlaybackState::playing) return;
+    {
+        const auto st = state_.load(std::memory_order_acquire);
+        if (st != PlaybackState::playing && st != PlaybackState::buffering) return;
+    }
 
     std::scoped_lock lk{mu_};
     Pipe* p = pipe_.get();
@@ -522,38 +639,20 @@ const JellyfinStation* JellyfinSource::active_station_locked() const noexcept {
 }
 
 void JellyfinSource::set_active_station(std::string name) {
-    JellyfinConfig snap;
-    std::string target_id;
-    bool target_fav = false;
-    {
-        std::scoped_lock lk{mu_};
-        if (cfg_.active_station == name && target_playlist_.empty()) return;
-        cfg_.active_station = std::move(name);
-        target_playlist_.clear();
-        snap = cfg_;
-        auto* st = active_station_locked();
-        if (st) {
-            target_id = st->playlist_id;
-            target_fav = st->use_favorites;
-        }
-    }
-
-    std::optional<std::vector<JellyfinTrack>> tracks;
-    {
-        std::scoped_lock fetch_lk{fetch_serializer()};
-        tracks = fetch_tracks(snap, target_id, target_fav);
-    }
-
     std::scoped_lock lk{mu_};
+    if (cfg_.active_station == name && target_playlist_.empty()) return;
+
+    const auto st     = state_.load(std::memory_order_acquire);
+    const bool resume = st == PlaybackState::playing || st == PlaybackState::buffering;
+
+    cfg_.active_station = std::move(name);
+    target_playlist_.clear();
+    invalidate_queue_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
-    if (tracks) {
-        queue_ = std::move(*tracks);
-        current_idx_ = 0;
-        if (cfg_.shuffle) shuffle_range(queue_, 0);
-    } else {
-        queue_.clear();
-        current_idx_ = 0;
+    if (resume) {
+        start_pipe_locked();
+        sync_play_state_locked();
     }
 }
 
@@ -571,27 +670,56 @@ std::string JellyfinSource::active_station_name() const {
 JellyfinSource::QueueSnapshot JellyfinSource::queue_snapshot() const {
     std::scoped_lock lk{mu_};
     QueueSnapshot snap;
-    snap.cursor = current_idx_;
+    snap.cursor   = current_idx_;
+    snap.scanning = queue_scanning_;
+    snap.error    = queue_error_;
     snap.entries.reserve(queue_.size());
     for (std::size_t i = 0; i < queue_.size(); ++i) {
-        snap.entries.push_back({i, queue_[i].title, queue_[i].artist, queue_[i].album});
+        QueueEntry e;
+        e.index       = i;
+        e.id          = queue_[i].id;
+        e.title       = queue_[i].title;
+        e.artist      = queue_[i].artist;
+        e.album       = queue_[i].album;
+        e.image_tag   = queue_[i].image_tag;
+        e.duration_ms = queue_[i].duration_ms;
+        snap.entries.push_back(std::move(e));
     }
     return snap;
 }
 
 JellyfinSource::QueueStatus JellyfinSource::queue_status() const {
     std::scoped_lock lk{mu_};
-    return {current_idx_, queue_.size()};
+    return {current_idx_, queue_.size(), queue_scanning_, queue_error_};
 }
 
 bool JellyfinSource::jump_to(std::size_t index) {
     std::scoped_lock lk{mu_};
     if (index >= queue_.size()) return false;
     current_idx_ = index;
-    if (!promote_prefetch_locked(current_idx_)) {
-        start_pipe_locked();
-    }
-    if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
+    if (!promote_prefetch_locked(current_idx_)) start_pipe_locked();
+    sync_play_state_locked();
+    return true;
+}
+
+bool JellyfinSource::move_queue_entry(std::size_t from, std::size_t to) {
+    std::scoped_lock lk{mu_};
+    if (from >= queue_.size() || to >= queue_.size()) return false;
+    // Only the upcoming part is editable; the current track stays put.
+    if (from <= current_idx_ || to <= current_idx_) return false;
+    if (from == to) return true;
+    auto entry = std::move(queue_[from]);
+    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(from));
+    queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(to), std::move(entry));
+    discard_prefetch_locked();
+    return true;
+}
+
+bool JellyfinSource::remove_queue_entry(std::size_t index) {
+    std::scoped_lock lk{mu_};
+    if (index >= queue_.size() || index <= current_idx_) return false;
+    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(index));
+    discard_prefetch_locked();
     return true;
 }
 
@@ -599,15 +727,15 @@ void JellyfinSource::set_shuffle(bool shuffle) {
     std::scoped_lock lk{mu_};
     cfg_.shuffle = shuffle;
     discard_prefetch_locked();
-    if (shuffle && queue_.size() > 1) {
-        shuffle_range(queue_, current_idx_ + 1);
-    } else if (!shuffle && queue_.size() > 1) {
-        auto start = queue_.begin() + static_cast<std::ptrdiff_t>(current_idx_ + 1);
-        if (start < queue_.end()) {
-            std::sort(start, queue_.end(), [](const auto& a, const auto& b) { 
-                return a.original_index < b.original_index;
-            });
-        }
+
+    const std::size_t from = std::min(current_idx_ + 1, queue_.size());
+    if (shuffle) {
+        shuffle_range(queue_, from);
+    } else if (from < queue_.size()) {
+        auto start = queue_.begin() + static_cast<std::ptrdiff_t>(from);
+        std::sort(start, queue_.end(), [](const auto& a, const auto& b) {
+            return a.original_index < b.original_index;
+        });
     }
 }
 

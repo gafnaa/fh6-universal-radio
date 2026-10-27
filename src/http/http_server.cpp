@@ -23,11 +23,15 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace fh6::http {
 
@@ -82,6 +86,44 @@ json track_to_json(const TrackInfo& t) {
     };
 }
 
+json saved_track_to_json(const SavedTrack& t) {
+    return json{
+        {"id", t.id},
+        {"title", t.title},
+        {"artist", t.artist},
+        {"album", t.album},
+        {"image_tag", t.image_tag},
+        {"duration_ms", t.duration_ms},
+    };
+}
+
+json saved_tracks_to_json(const std::vector<SavedTrack>& v) {
+    json a = json::array();
+    for (const auto& t : v) a.push_back(saved_track_to_json(t));
+    return a;
+}
+
+std::vector<SavedTrack> saved_tracks_from_json(const json& a) {
+    std::vector<SavedTrack> out;
+    if (!a.is_array()) return out;
+    for (const auto& item : a) {
+        if (!item.is_object()) continue;
+        SavedTrack t;
+        t.id        = item.value("id", std::string{});
+        t.title     = item.value("title", std::string{});
+        t.artist    = item.value("artist", std::string{});
+        t.album     = item.value("album", std::string{});
+        t.image_tag = item.value("image_tag", std::string{});
+        try {
+            t.duration_ms = item.value("duration_ms", std::uint64_t{});
+        } catch (...) {
+            t.duration_ms = 0;
+        }
+        if (!t.id.empty()) out.push_back(std::move(t));
+    }
+    return out;
+}
+
 json source_to_json(IAudioSource* s) {
     auto c = s->capabilities();
     json j{
@@ -115,6 +157,8 @@ json source_to_json(IAudioSource* s) {
         const auto status = yt->queue_status();
         j["details"]["queue_size"] = status.size;
         j["details"]["queue_cursor"] = status.cursor;
+        j["details"]["queue_scanning"] = status.scanning;
+        j["details"]["queue_error"] = status.error;
     }
     if (auto* jf = dynamic_cast<sources::JellyfinSource*>(s)) {
         j["details"]["shuffle"] = jf->shuffle();
@@ -124,6 +168,8 @@ json source_to_json(IAudioSource* s) {
         const auto status = jf->queue_status();
         j["details"]["queue_size"] = status.size;
         j["details"]["queue_cursor"] = status.cursor;
+        j["details"]["queue_scanning"] = status.scanning;
+        j["details"]["queue_error"] = status.error;
     }
     if (auto* rd = dynamic_cast<sources::OnlineRadioSource*>(s))
         j["details"]["song_history"] = rd->song_history();
@@ -155,7 +201,7 @@ json stations_to_json(const std::vector<LocalStation>& v) {
 }
 
 json yt_station_to_json(const YouTubeStation& s) {
-    return json{{"name", s.name}, {"url", s.url}};
+    return json{{"name", s.name}, {"url", s.url}, {"tracks", saved_tracks_to_json(s.tracks)}};
 }
 
 json yt_stations_to_json(const std::vector<YouTubeStation>& v) {
@@ -165,17 +211,19 @@ json yt_stations_to_json(const std::vector<YouTubeStation>& v) {
 }
 
 YouTubeStation yt_station_from_json(const json& j) {
-    return YouTubeStation{
-        j.value("name", ""),
-        j.value("url", "")
-    };
+    YouTubeStation s;
+    s.name = j.value("name", std::string{});
+    s.url  = j.value("url", std::string{});
+    if (auto it = j.find("tracks"); it != j.end()) s.tracks = saved_tracks_from_json(*it);
+    return s;
 }
 
 json jf_station_to_json(const JellyfinStation& s) {
     return json{
         {"name", s.name},
         {"playlist_id", s.playlist_id},
-        {"use_favorites", s.use_favorites}
+        {"use_favorites", s.use_favorites},
+        {"tracks", saved_tracks_to_json(s.tracks)},
     };
 }
 
@@ -186,11 +234,12 @@ json jf_stations_to_json(const std::vector<JellyfinStation>& v) {
 }
 
 JellyfinStation jf_station_from_json(const json& j) {
-    return JellyfinStation{
-        j.value("name", ""),
-        j.value("playlist_id", ""),
-        j.value("use_favorites", false)
-    };
+    JellyfinStation s;
+    s.name          = j.value("name", std::string{});
+    s.playlist_id   = j.value("playlist_id", std::string{});
+    s.use_favorites = j.value("use_favorites", false);
+    if (auto it = j.find("tracks"); it != j.end()) s.tracks = saved_tracks_from_json(*it);
+    return s;
 }
 
 json config_to_json(const Config& c) {
@@ -542,6 +591,7 @@ bool read_request(SOCKET client, Request& req) {
 
     const std::string_view headers{raw.data(), header_end};
     const size_t content_length = header_size_t(headers, "content-length");
+    if (content_length > 1u << 20) return false; // 1 MiB body guard
 
     req.body.assign(raw, header_end + 4, std::string::npos);
     while (req.body.size() < content_length) {
@@ -596,8 +646,21 @@ struct HttpServer::Impl {
     youtube_oauth::Client youtube_oauth;
     std::atomic<bool> stopping{false};
     std::atomic<uint16_t> bound_port{0};
+    std::mutex socket_mu_;
     SOCKET srv_sock = INVALID_SOCKET;
     std::thread thr;
+
+    // A small worker pool keeps one slow request (playlist scan, OAuth call,
+    // HTTP fetch) from stalling the dashboard. Accepted sockets are handed
+    // off here; the accept loop never does request work itself.
+    static constexpr std::size_t kWorkerCount   = 4;
+    static constexpr std::size_t kMaxQueuedSock = 64;
+    std::mutex queue_mu_;
+    std::condition_variable queue_cv_;
+    std::deque<SOCKET> pending_socks_;
+    std::vector<std::thread> workers_;
+    std::atomic<bool> wsa_ready{false};
+    std::atomic<bool> accept_done{false};
 
     Impl(AudioSourceManager& m, fmod_bridge::DSPBridge& b, ConfigStore& s, DependencyManager& d,
          uint16_t port, std::filesystem::path dist, std::filesystem::path data_dir)
@@ -607,8 +670,20 @@ struct HttpServer::Impl {
     }
     ~Impl() {
         stopping.store(true, std::memory_order_release);
-        if (srv_sock != INVALID_SOCKET) closesocket(srv_sock);
+        {
+            std::scoped_lock lk{socket_mu_};
+            if (srv_sock != INVALID_SOCKET) {
+                closesocket(srv_sock);
+                srv_sock = INVALID_SOCKET;
+            }
+        }
         if (thr.joinable()) thr.join();
+        // Workers drain whatever was already accepted before exiting.
+        accept_done.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+        for (auto& w : workers_)
+            if (w.joinable()) w.join();
+        if (wsa_ready.load(std::memory_order_acquire)) WSACleanup();
     }
 
     json build_sources() const {
@@ -654,15 +729,15 @@ struct HttpServer::Impl {
             log::error("[http] WSAStartup failed");
             return;
         }
+        wsa_ready.store(true, std::memory_order_release);
 
-        srv_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (srv_sock == INVALID_SOCKET) {
+        SOCKET server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (server == INVALID_SOCKET) {
             log::error("[http] socket() failed");
-            WSACleanup();
             return;
         }
         BOOL yes = TRUE;
-        setsockopt(srv_sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes),
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes),
                    sizeof(yes));
 
         sockaddr_in addr{};
@@ -671,42 +746,91 @@ struct HttpServer::Impl {
 
         uint16_t bound = port;
         addr.sin_port  = htons(bound);
-        if (bind(srv_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             bound         = static_cast<uint16_t>(port + 1);
             addr.sin_port = htons(bound);
-            if (bind(srv_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
                 log::error("[http] could not bind port {} or {}", port, bound);
-                closesocket(srv_sock);
-                srv_sock = INVALID_SOCKET;
-                WSACleanup();
+                closesocket(server);
                 return;
             }
         }
 
-        if (listen(srv_sock, 16) != 0) {
+        if (listen(server, 16) != 0) {
             log::error("[http] listen() failed");
-            closesocket(srv_sock);
-            srv_sock = INVALID_SOCKET;
-            WSACleanup();
+            closesocket(server);
             return;
+        }
+        {
+            std::scoped_lock lk{socket_mu_};
+            if (stopping.load(std::memory_order_acquire)) {
+                closesocket(server);
+                return;
+            }
+            srv_sock = server;
         }
         bound_port.store(bound, std::memory_order_release);
         log::info("[http] listening on http://0.0.0.0:{} (LAN-reachable)", bound);
 
+        workers_.reserve(kWorkerCount);
+        for (std::size_t i = 0; i < kWorkerCount; ++i)
+            workers_.emplace_back([this] { worker_loop(); });
+
         while (!stopping.load(std::memory_order_acquire)) {
             fd_set rfds;
             FD_ZERO(&rfds);
-            FD_SET(srv_sock, &rfds);
+            FD_SET(server, &rfds);
             timeval tv{0, 200'000};
             if (select(0, &rfds, nullptr, nullptr, &tv) <= 0) continue;
 
-            SOCKET client = accept(srv_sock, nullptr, nullptr);
+            SOCKET client = accept(server, nullptr, nullptr);
             if (client == INVALID_SOCKET) continue;
-            handle(client);
+
+            {
+                std::scoped_lock lk{queue_mu_};
+                if (pending_socks_.size() >= kMaxQueuedSock) {
+                    closesocket(client);
+                    continue;
+                }
+                pending_socks_.push_back(client);
+            }
+            queue_cv_.notify_one();
+        }
+    }
+
+    void worker_loop() {
+        for (;;) {
+            SOCKET client = INVALID_SOCKET;
+            {
+                std::unique_lock lk{queue_mu_};
+                queue_cv_.wait(lk, [&] {
+                    return (stopping.load(std::memory_order_acquire) &&
+                            accept_done.load(std::memory_order_acquire)) ||
+                           !pending_socks_.empty();
+                });
+                if (pending_socks_.empty()) {
+                    if (accept_done.load(std::memory_order_acquire)) return;
+                    continue;
+                }
+                client = pending_socks_.front();
+                pending_socks_.pop_front();
+            }
+
+            // A client that opens a connection and never sends must not pin a
+            // worker forever.
+            DWORD timeout = 15'000;
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+                       reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+            try {
+                handle(client);
+            } catch (...) {
+                // A malformed request must not take a worker down.
+            }
             closesocket(client);
         }
-
-        WSACleanup();
     }
 
     void handle(SOCKET client) {
@@ -807,7 +931,28 @@ struct HttpServer::Impl {
                 tracks.push_back(
                     json{{"index", e.index}, {"title", e.title}, {"folder", e.folder}});
             }
-            return ok(json{{"cursor", snap.cursor}, {"tracks", tracks}});
+            return ok(json{{"cursor", snap.cursor},
+                           {"scanning", false},
+                           {"error", ""},
+                           {"tracks", std::move(tracks)}});
+        }
+        if (m == "POST" && p == "/api/source/local_files/queue/move") {
+            auto* lf = find_typed<sources::LocalFileSource>("local_files");
+            if (!lf) return fail(404, "local_files not registered");
+            auto body = json::parse(req.body);
+            const auto from = body.at("from").get<std::size_t>();
+            const auto to   = body.at("to").get<std::size_t>();
+            if (!lf->move_queue_entry(from, to))
+                return fail(400, "cannot move that queue entry");
+            return ok();
+        }
+        if (m == "POST" && p == "/api/source/local_files/queue/remove") {
+            auto* lf = find_typed<sources::LocalFileSource>("local_files");
+            if (!lf) return fail(404, "local_files not registered");
+            const auto index = json::parse(req.body).at("index").get<std::size_t>();
+            if (!lf->remove_queue_entry(index))
+                return fail(400, "cannot remove that queue entry");
+            return ok();
         }
         if (m == "POST" && p == "/api/fs/browse") {
             auto j                    = req.body.empty() ? json::object() : json::parse(req.body);
@@ -1078,7 +1223,64 @@ struct HttpServer::Impl {
                 tracks.push_back(
                     json{{"index", e.index}, {"title", e.title}, {"artist", e.artist}, {"url", e.url}});
             }
-            return ok(json{{"cursor", snap.cursor}, {"tracks", tracks}});
+            return ok(json{{"cursor", snap.cursor},
+                           {"scanning", snap.scanning},
+                           {"error", snap.error},
+                           {"tracks", std::move(tracks)}});
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/queue/move") {
+            auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
+            if (!yt) return fail(404, "youtube_music not registered");
+            auto body = json::parse(req.body);
+            const auto from = body.at("from").get<std::size_t>();
+            const auto to   = body.at("to").get<std::size_t>();
+            if (!yt->move_queue_entry(from, to))
+                return fail(400, "cannot move that queue entry");
+            return ok();
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/queue/remove") {
+            auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
+            if (!yt) return fail(404, "youtube_music not registered");
+            const auto index = json::parse(req.body).at("index").get<std::size_t>();
+            if (!yt->remove_queue_entry(index))
+                return fail(400, "cannot remove that queue entry");
+            return ok();
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/queue/save") {
+            auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
+            if (!yt) return fail(404, "youtube_music not registered");
+            auto body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string base = body.value("name", std::string{});
+            if (base.empty()) base = "Saved queue";
+            const auto snap = yt->queue_snapshot();
+            if (snap.entries.empty()) return fail(400, "queue is empty");
+
+            std::vector<SavedTrack> saved;
+            saved.reserve(snap.entries.size());
+            for (const auto& e : snap.entries) {
+                SavedTrack t;
+                t.id    = e.url;
+                t.title = e.title;
+                t.artist = e.artist;
+                saved.push_back(std::move(t));
+            }
+
+            std::string created;
+            store.patch([&](Config& c) {
+                created = base;
+                auto used = [&](const std::string& name) {
+                    return std::any_of(c.youtube_music.stations.begin(),
+                                       c.youtube_music.stations.end(),
+                                       [&](const YouTubeStation& st) { return st.name == name; });
+                };
+                for (std::size_t suffix = 2; used(created); ++suffix)
+                    created = base + " (" + std::to_string(suffix) + ")";
+                YouTubeStation station;
+                station.name   = created;
+                station.tracks = saved;
+                c.youtube_music.stations.push_back(std::move(station));
+            });
+            return ok(json{{"name", created}, {"track_count", saved.size()}});
         }
 
         if (m == "POST" && p == "/api/source/youtube_music/play" && !req.body.empty()) {
@@ -1152,10 +1354,75 @@ struct HttpServer::Impl {
             auto snap = jf->queue_snapshot();
             json tracks = json::array();
             for (const auto& e : snap.entries) {
-                tracks.push_back(
-                    json{{"index", e.index}, {"title", e.title}, {"artist", e.artist}, {"album", e.album}});
+                tracks.push_back(json{{"index", e.index},
+                                      {"id", e.id},
+                                      {"title", e.title},
+                                      {"artist", e.artist},
+                                      {"album", e.album},
+                                      {"image_tag", e.image_tag},
+                                      {"duration_ms", e.duration_ms}});
             }
-            return ok(json{{"cursor", snap.cursor}, {"tracks", tracks}});
+            return ok(json{{"cursor", snap.cursor},
+                           {"scanning", snap.scanning},
+                           {"error", snap.error},
+                           {"tracks", std::move(tracks)}});
+        }
+        if (m == "POST" && p == "/api/source/jellyfin/queue/move") {
+            auto* jf = find_typed<sources::JellyfinSource>("jellyfin");
+            if (!jf) return fail(404, "jellyfin not registered");
+            auto body = json::parse(req.body);
+            const auto from = body.at("from").get<std::size_t>();
+            const auto to   = body.at("to").get<std::size_t>();
+            if (!jf->move_queue_entry(from, to))
+                return fail(400, "cannot move that queue entry");
+            return ok();
+        }
+        if (m == "POST" && p == "/api/source/jellyfin/queue/remove") {
+            auto* jf = find_typed<sources::JellyfinSource>("jellyfin");
+            if (!jf) return fail(404, "jellyfin not registered");
+            const auto index = json::parse(req.body).at("index").get<std::size_t>();
+            if (!jf->remove_queue_entry(index))
+                return fail(400, "cannot remove that queue entry");
+            return ok();
+        }
+        if (m == "POST" && p == "/api/source/jellyfin/queue/save") {
+            auto* jf = find_typed<sources::JellyfinSource>("jellyfin");
+            if (!jf) return fail(404, "jellyfin not registered");
+            auto body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string base = body.value("name", std::string{});
+            if (base.empty()) base = "Saved queue";
+            const auto snap = jf->queue_snapshot();
+            if (snap.entries.empty()) return fail(400, "queue is empty");
+
+            std::vector<SavedTrack> saved;
+            saved.reserve(snap.entries.size());
+            for (const auto& e : snap.entries) {
+                SavedTrack t;
+                t.id          = e.id;
+                t.title       = e.title;
+                t.artist      = e.artist;
+                t.album       = e.album;
+                t.image_tag   = e.image_tag;
+                t.duration_ms = e.duration_ms;
+                saved.push_back(std::move(t));
+            }
+
+            std::string created;
+            store.patch([&](Config& c) {
+                created = base;
+                auto used = [&](const std::string& name) {
+                    return std::any_of(c.jellyfin.stations.begin(),
+                                       c.jellyfin.stations.end(),
+                                       [&](const JellyfinStation& st) { return st.name == name; });
+                };
+                for (std::size_t suffix = 2; used(created); ++suffix)
+                    created = base + " (" + std::to_string(suffix) + ")";
+                JellyfinStation station;
+                station.name   = created;
+                station.tracks = saved;
+                c.jellyfin.stations.push_back(std::move(station));
+            });
+            return ok(json{{"name", created}, {"track_count", saved.size()}});
         }
         if (m == "POST" && p == "/api/source/jellyfin/play" && !req.body.empty()) {
             auto* jf = find_typed<sources::JellyfinSource>("jellyfin");

@@ -23,6 +23,9 @@ public:
     void on_change(Observer obs);
 
 private:
+    // Serialises mutation + observer fan-out so concurrent HTTP requests
+    // cannot deliver config notifications out of order.
+    std::mutex commit_mu_;
     mutable std::mutex mu_;
     std::filesystem::path path_;
     Config cfg_;

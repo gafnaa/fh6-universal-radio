@@ -33,6 +33,25 @@ const toml::value& section(const toml::value& root, const char* key) {
     return empty;
 }
 
+std::vector<SavedTrack> read_saved_tracks(const toml::value& station) {
+    std::vector<SavedTrack> out;
+    try {
+        if (!station.contains("tracks")) return out;
+        for (const auto& tr : toml::find<std::vector<toml::value>>(station, "tracks")) {
+            SavedTrack t;
+            t.id          = pick<std::string>(tr, "id", "");
+            t.title       = pick<std::string>(tr, "title", "");
+            t.artist      = pick<std::string>(tr, "artist", "");
+            t.album       = pick<std::string>(tr, "album", "");
+            t.image_tag   = pick<std::string>(tr, "image_tag", "");
+            const auto ms = pick<std::int64_t>(tr, "duration_ms", 0);
+            t.duration_ms = ms > 0 ? static_cast<std::uint64_t>(ms) : 0;
+            if (!t.id.empty()) out.push_back(std::move(t));
+        }
+    } catch (...) {}
+    return out;
+}
+
 } // namespace
 
 Config load_config(const std::filesystem::path& path) {
@@ -125,6 +144,7 @@ Config load_config(const std::filesystem::path& path) {
                 YouTubeStation s;
                 s.name = pick<std::string>(st, "name", "");
                 s.url  = pick<std::string>(st, "url", "");
+                s.tracks = read_saved_tracks(st);
                 cfg.youtube_music.stations.push_back(std::move(s));
             }
         }
@@ -163,6 +183,7 @@ Config load_config(const std::filesystem::path& path) {
                 s.name          = pick<std::string>(st, "name", "");
                 s.playlist_id   = pick<std::string>(st, "playlist_id", "");
                 s.use_favorites = pick<bool>(st, "use_favorites", false);
+                s.tracks        = read_saved_tracks(st);
                 cfg.jellyfin.stations.push_back(std::move(s));
             }
         }
@@ -408,6 +429,15 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
         e.array_header("youtube_music.stations");
         e.kv("name", st.name);
         e.kv("url", st.url);
+        for (const auto& t : st.tracks) {
+            e.array_header("youtube_music.stations.tracks");
+            e.kv("id", t.id);
+            e.kv("title", t.title);
+            e.kv("artist", t.artist);
+            if (!t.album.empty()) e.kv("album", t.album);
+            if (!t.image_tag.empty()) e.kv("image_tag", t.image_tag);
+            if (t.duration_ms) e.kv("duration_ms", (int64_t)t.duration_ms);
+        }
     }
 
     e.header("jellyfin");
@@ -422,6 +452,15 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
         e.kv("name", st.name);
         e.kv("playlist_id", st.playlist_id);
         e.kv("use_favorites", st.use_favorites);
+        for (const auto& t : st.tracks) {
+            e.array_header("jellyfin.stations.tracks");
+            e.kv("id", t.id);
+            e.kv("title", t.title);
+            e.kv("artist", t.artist);
+            if (!t.album.empty()) e.kv("album", t.album);
+            if (!t.image_tag.empty()) e.kv("image_tag", t.image_tag);
+            if (t.duration_ms) e.kv("duration_ms", (int64_t)t.duration_ms);
+        }
     }
 
     e.header("external_audio");

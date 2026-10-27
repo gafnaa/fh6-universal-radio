@@ -221,6 +221,11 @@ YouTubeMusicSource::QueueSnapshot YouTubeMusicSource::queue_snapshot() const {
     return snap;
 }
 
+YouTubeMusicSource::QueueStatus YouTubeMusicSource::queue_status() const {
+    std::scoped_lock lk{mu_};
+    return {queue_idx_, queue_.size()};
+}
+
 bool YouTubeMusicSource::jump_to(std::size_t index) {
     std::scoped_lock lk{mu_};
     if (index >= queue_.size()) return false;

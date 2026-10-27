@@ -51,7 +51,7 @@ export function createJellyfin(main, ctx) {
         const parts = [`${stationSelect.options.length} ${t("label.stations")}`];
         if (trackCount != null) parts.unshift(`${trackCount} ${t("label.tracks")}`);
 
-        summaryEl.textContent = parts.join(" · ");
+        summaryEl.textContent = parts.join(", ");
         summaryEl.hidden = false;
     }
 

@@ -111,18 +111,18 @@ json source_to_json(IAudioSource* s) {
         j["details"]["station_count"] = yt->station_count();
         j["details"]["active_station"] = yt->active_station_name();
 
-        auto snap = yt->queue_snapshot();
-        j["details"]["queue_size"] = snap.entries.size();
-        j["details"]["queue_cursor"] = snap.cursor;
+        const auto status = yt->queue_status();
+        j["details"]["queue_size"] = status.size;
+        j["details"]["queue_cursor"] = status.cursor;
     }
     if (auto* jf = dynamic_cast<sources::JellyfinSource*>(s)) {
         j["details"]["shuffle"] = jf->shuffle();
         j["details"]["station_count"] = jf->station_count();
         j["details"]["active_station"] = jf->active_station_name();
 
-        auto snap = jf->queue_snapshot();
-        j["details"]["queue_size"] = snap.entries.size();
-        j["details"]["queue_cursor"] = snap.cursor;
+        const auto status = jf->queue_status();
+        j["details"]["queue_size"] = status.size;
+        j["details"]["queue_cursor"] = status.cursor;
     }
     if (auto* rd = dynamic_cast<sources::OnlineRadioSource*>(s))
         j["details"]["song_history"] = rd->song_history();

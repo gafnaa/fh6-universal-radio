@@ -6,13 +6,16 @@
 #include "fh6/worker/worker_client.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fh6::sources {
@@ -108,6 +111,19 @@ private:
         std::uint64_t duration_ms = 0;
     };
 
+    struct ArtworkCacheEntry {
+        std::int64_t mtime = 0;
+        ArtworkImage image;
+        std::uint64_t last_used = 0;
+    };
+
+    struct ArtworkRequest {
+        std::filesystem::path path;
+        std::string key;
+        std::int64_t mtime = 0;
+        std::wstring ffmpeg_path;
+    };
+
     void rebuild_playlist();
     const LocalStation* active_station_locked() const noexcept;
     bool is_shuffle_locked() const noexcept;
@@ -132,12 +148,17 @@ private:
                       std::uint64_t gen, bool resort);
     void load_index_if_needed();
     void save_index();
+    void queue_artwork(const std::filesystem::path& path, std::string key, std::int64_t mtime);
+    void artwork_worker();
+    bool find_artwork(const std::string& key, std::int64_t mtime, ArtworkImage* out) const;
+    void stop_artwork_worker();
     std::vector<std::filesystem::path>
     order_album_by_tags(const std::vector<std::filesystem::path>& in);
 
     // Open one decoder for playlist_[index] (miniaudio first, ffmpeg fallback).
     // Returns nullptr if the file is unplayable / out of range.
-    std::unique_ptr<Decoder> open_decoder_locked(std::size_t index);
+    std::unique_ptr<Decoder> open_decoder_locked(std::size_t index,
+                                                 bool require_cached_metadata = false);
     bool open_track_ffmpeg(Decoder& d, const std::filesystem::path& path);
     bool open_track(std::size_t index); // open + install as current
     void close_current();
@@ -170,6 +191,15 @@ private:
     std::atomic<bool> tag_cancel_{false};
     std::atomic<std::uint64_t> rebuild_gen_{0};
     std::atomic<std::uint64_t> index_version_{0};
+
+    mutable std::mutex artwork_mu_;
+    std::condition_variable artwork_cv_;
+    std::unordered_map<std::string, ArtworkCacheEntry> artwork_cache_;
+    std::unordered_set<std::string> artwork_pending_;
+    std::deque<ArtworkRequest> artwork_queue_;
+    std::thread artwork_thread_;
+    bool artwork_stopping_ = false;
+    mutable std::uint64_t artwork_use_counter_ = 0;
 
     EqualizerStage eq_;
     std::atomic<bool> volume_norm_{true};

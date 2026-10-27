@@ -73,7 +73,7 @@ const normalize = st => ({
 const badgeText = s =>
   [s.tags?.split(",")[0]?.trim(), s.country, s.bitrate ? `${s.bitrate}kbps` : ""]
     .filter(Boolean)
-    .join(" · ");
+    .join(", ");
 
 // Online Radio card: cast bar, saved stations, recents, and a directory browser.
 export function createOnlineRadio(main, ctx) {

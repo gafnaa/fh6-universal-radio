@@ -292,7 +292,7 @@ export function createLocalFiles(main, ctx) {
             class: "caret" + (entry.has_children ? "" : " empty"),
             "aria-label": entry.has_children ? (isOpen ? t("local_files.tree.collapse") : t("local_files.tree.expand")) : undefined,
             "aria-expanded": entry.has_children ? String(isOpen) : undefined,
-        }, entry.has_children ? (isOpen ? "▾" : "▸") : "·");
+        }, entry.has_children ? (isOpen ? "▾" : "▸") : "");
         if (entry.has_children) {
             caret.addEventListener("click", () => {
                 if (expanded.has(norm(entry.path))) expanded.delete(norm(entry.path));
@@ -354,7 +354,7 @@ export function createLocalFiles(main, ctx) {
         if (trackCount != null) parts.push(`${trackCount} ${t("label.tracks")}`);
         parts.push(`${folderCount} ${t("local_files.summary.folders")}`);
 
-        summaryEl.textContent = parts.join(" · ");
+        summaryEl.textContent = parts.join(", ");
         summaryEl.hidden = false;
     }
 
@@ -377,7 +377,7 @@ export function createLocalFiles(main, ctx) {
     saveBtn.addEventListener("click", async () => {
         try {
             const r = await station.save();
-            toast(`${t("btn.save")} · ${r.track_count} ${t("label.tracks")}`);
+            toast(`${t("btn.save")}, ${r.track_count} ${t("label.tracks")}`);
         } catch {
             // Error handling already deferred to the station manager
         }

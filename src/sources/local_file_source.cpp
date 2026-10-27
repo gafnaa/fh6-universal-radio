@@ -25,8 +25,10 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <set>
+#include <string_view>
 #include <unordered_map>
 
 namespace fh6::sources {
@@ -272,7 +274,8 @@ struct LocalFileSource::Decoder {
     bool ff_eof                = false;
 
     TrackInfo info{};
-    ArtworkImage art{};
+    std::string artwork_key;
+    std::int64_t artwork_mtime = 0;
     // Per-decoder so a prefetched track promotes with its own ReplayGain
     // multiplier instead of inheriting the current track's.
     float loudness_coef    = 1.0f;
@@ -298,10 +301,14 @@ LocalFileSource::LocalFileSource(LocalFilesConfig cfg, std::filesystem::path ffm
 
 LocalFileSource::~LocalFileSource() {
     stop_tag_thread();
+    stop_artwork_worker();
     close_current();
 }
 
-void LocalFileSource::shutdown() noexcept { close_current(); }
+void LocalFileSource::shutdown() noexcept {
+    stop_artwork_worker();
+    close_current();
+}
 
 bool LocalFileSource::initialize() {
     if (!cfg_.enabled) return false;
@@ -539,6 +546,104 @@ void LocalFileSource::save_index() {
     }
 }
 
+void LocalFileSource::queue_artwork(const std::filesystem::path& path, std::string key,
+                                    std::int64_t mtime) {
+    std::scoped_lock lk{artwork_mu_};
+    if (artwork_stopping_) return;
+    if (const auto it = artwork_cache_.find(key);
+        it != artwork_cache_.end() && it->second.mtime == mtime) {
+        it->second.last_used = ++artwork_use_counter_;
+        return;
+    }
+    if (artwork_pending_.contains(key)) return;
+
+    // Only the current track and a nearby prefetch are useful. Drop stale
+    // queued requests rather than letting a fast station skip build a backlog.
+    constexpr std::size_t kMaxQueuedArtwork = 4;
+    if (artwork_queue_.size() >= kMaxQueuedArtwork) {
+        artwork_pending_.erase(artwork_queue_.front().key);
+        artwork_queue_.pop_front();
+    }
+    artwork_pending_.insert(key);
+    artwork_queue_.push_back({path, std::move(key), mtime,
+                              ffmpeg_path_.empty() ? L"ffmpeg" : ffmpeg_path_.wstring()});
+    if (!artwork_thread_.joinable()) {
+        try {
+            artwork_thread_ = std::thread(&LocalFileSource::artwork_worker, this);
+        } catch (...) {
+            artwork_pending_.erase(artwork_queue_.back().key);
+            artwork_queue_.pop_back();
+            return;
+        }
+    }
+    artwork_cv_.notify_one();
+}
+
+void LocalFileSource::artwork_worker() {
+    for (;;) {
+        ArtworkRequest request;
+        {
+            std::unique_lock lk{artwork_mu_};
+            artwork_cv_.wait(lk, [&] { return artwork_stopping_ || !artwork_queue_.empty(); });
+            if (artwork_stopping_) return;
+            request = std::move(artwork_queue_.front());
+            artwork_queue_.pop_front();
+        }
+
+        ArtworkImage image;
+        try {
+            image = extract_cover(request.ffmpeg_path, request.path, worker_);
+        } catch (...) {
+        }
+
+        std::scoped_lock lk{artwork_mu_};
+        artwork_pending_.erase(request.key);
+        if (artwork_stopping_) return;
+
+        ArtworkCacheEntry entry;
+        entry.mtime = request.mtime;
+        entry.image = std::move(image);
+        entry.last_used = ++artwork_use_counter_;
+        artwork_cache_[request.key] = std::move(entry);
+
+        constexpr std::size_t kMaxCachedArtwork = 24;
+        constexpr std::size_t kMaxArtworkBytes = 32u << 20;
+        auto cached_bytes = [&] {
+            std::size_t bytes = 0;
+            for (const auto& [_, cached] : artwork_cache_) bytes += cached.image.bytes.size();
+            return bytes;
+        };
+        while (artwork_cache_.size() > kMaxCachedArtwork || cached_bytes() > kMaxArtworkBytes) {
+            auto oldest = artwork_cache_.begin();
+            for (auto it = std::next(artwork_cache_.begin()); it != artwork_cache_.end(); ++it)
+                if (it->second.last_used < oldest->second.last_used) oldest = it;
+            artwork_cache_.erase(oldest);
+        }
+    }
+}
+
+bool LocalFileSource::find_artwork(const std::string& key, std::int64_t mtime,
+                                   ArtworkImage* out) const {
+    std::scoped_lock lk{artwork_mu_};
+    const auto it = artwork_cache_.find(key);
+    if (it == artwork_cache_.end() || it->second.mtime != mtime || it->second.image.bytes.empty())
+        return false;
+    it->second.last_used = ++artwork_use_counter_;
+    if (out) *out = it->second.image;
+    return true;
+}
+
+void LocalFileSource::stop_artwork_worker() {
+    {
+        std::scoped_lock lk{artwork_mu_};
+        artwork_stopping_ = true;
+        artwork_queue_.clear();
+        artwork_pending_.clear();
+    }
+    artwork_cv_.notify_all();
+    if (artwork_thread_.joinable()) artwork_thread_.join();
+}
+
 std::vector<std::filesystem::path>
 LocalFileSource::order_album_by_tags(const std::vector<std::filesystem::path>& in) {
     struct Item {
@@ -646,7 +751,8 @@ void LocalFileSource::close_current() {
     dec_.reset();
 }
 
-std::unique_ptr<LocalFileSource::Decoder> LocalFileSource::open_decoder_locked(std::size_t index) {
+std::unique_ptr<LocalFileSource::Decoder>
+LocalFileSource::open_decoder_locked(std::size_t index, bool require_cached_metadata) {
     if (playlist_.empty()) return nullptr;
     const std::size_t resolved = index % playlist_.size();
     const auto& path           = playlist_[resolved];
@@ -655,12 +761,38 @@ std::unique_ptr<LocalFileSource::Decoder> LocalFileSource::open_decoder_locked(s
     d->for_cursor = resolved;
 
     const std::wstring ff = ffmpeg_path_.empty() ? L"ffmpeg" : ffmpeg_path_.wstring();
-    auto meta      = probe_metadata(ff, path, worker_);
-    d->info.duration_ms = meta.duration_ms;
-    d->info.title       = std::move(meta.title);
-    d->info.artist      = std::move(meta.artist);
-    d->info.album       = std::move(meta.album);
-    d->art              = extract_cover(ff, path, worker_);
+    std::error_code ec;
+    const auto write_time = std::filesystem::last_write_time(path, ec);
+    const std::int64_t mtime =
+        ec ? 0 : static_cast<std::int64_t>(write_time.time_since_epoch().count());
+    const std::string key  = path_utf8(path);
+
+    TrackMeta cached_meta;
+    bool have_cached_meta = false;
+    {
+        std::scoped_lock il{index_mu_};
+        const auto it = index_.find(key);
+        if (it != index_.end() && it->second.mtime == mtime) {
+            cached_meta = it->second;
+            have_cached_meta = true;
+        }
+    }
+
+    if (have_cached_meta) {
+        d->info.duration_ms = cached_meta.duration_ms;
+        d->info.title = cached_meta.title;
+        d->info.artist = cached_meta.artist;
+        d->info.album = cached_meta.album;
+    } else {
+        // The control-loop prefetch must stay cheap. The index worker will
+        // populate this entry and the next pump tick can retry prebuffering.
+        if (require_cached_metadata) return nullptr;
+        auto meta = probe_metadata(ff, path, worker_);
+        d->info.duration_ms = meta.duration_ms;
+        d->info.title = std::move(meta.title);
+        d->info.artist = std::move(meta.artist);
+        d->info.album = std::move(meta.album);
+    }
 
     ma_decoder_config mc = ma_decoder_config_init(ma_format_s16, 2, kSampleRate);
     if (ma_decoder_init_file(path.string().c_str(), &mc, &d->ma) == MA_SUCCESS) {
@@ -684,6 +816,9 @@ std::unique_ptr<LocalFileSource::Decoder> LocalFileSource::open_decoder_locked(s
     parse_replaygain_file(path, gain_db, peak);
     d->loudness_coef = compute_loudness_correction(gain_db, peak);
 
+    d->artwork_key   = key + '\x01' + std::to_string(mtime);
+    d->artwork_mtime = mtime;
+    queue_artwork(path, d->artwork_key, mtime);
     return d;
 }
 
@@ -799,7 +934,7 @@ void LocalFileSource::maybe_spawn_prefetch_locked() {
     if (prefetch_dec_ || !dec_ || playlist_.size() < 2) return;
     // Local files (esp. miniaudio) open near-instantly, so no byte threshold is
     // needed -- spawning on the first pump tick after a track change is cheap.
-    prefetch_dec_ = open_decoder_locked(next_cursor_locked());
+    prefetch_dec_ = open_decoder_locked(next_cursor_locked(), true);
 }
 
 void LocalFileSource::play() {
@@ -969,7 +1104,8 @@ TrackInfo LocalFileSource::current_track() const {
     TrackInfo info;
     if (dec_) {
         info = dec_->info;
-        if (!dec_->art.bytes.empty() && dec_->for_cursor < playlist_.size()) {
+        if (find_artwork(dec_->artwork_key, dec_->artwork_mtime, nullptr) &&
+            dec_->for_cursor < playlist_.size()) {
             info.artwork_url =
                 "/api/artwork?v=" +
                 std::to_string(std::hash<std::string>{}(playlist_[dec_->for_cursor].string()));
@@ -981,7 +1117,8 @@ TrackInfo LocalFileSource::current_track() const {
 
 std::optional<ArtworkImage> LocalFileSource::artwork() const {
     std::scoped_lock lk{mu_};
-    if (dec_ && !dec_->art.bytes.empty()) return dec_->art;
+    ArtworkImage image;
+    if (dec_ && find_artwork(dec_->artwork_key, dec_->artwork_mtime, &image)) return image;
     return std::nullopt;
 }
 

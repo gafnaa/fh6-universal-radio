@@ -43,18 +43,18 @@ export function renderNowPlaying(refs, state) {
                 if (!prefs.dynamicColor.get()) return;
                 try {
                     const color = extractDominantColor(refs.img);
-                    if (color) document.documentElement.style.setProperty("--accent", color);
+                    if (color) document.body.style.setProperty("--accent", color);
                 } catch {
                     // CORS: ignore errors from cross-origin images
                 }
             };
         }
     } else {
-        if (refs.img.getAttribute("src") !== "../assets/default_artwork_2048.png") {
-            refs.img.src = "../assets/default_artwork_2048.png";
+        if (refs.img.getAttribute("src") !== "assets/default_artwork_2048.png") {
+            refs.img.src = "assets/default_artwork_2048.png";
         }
         if (!track.title) {
-            document.documentElement.style.setProperty("--accent", "var(--color-sunset-yellow)");
+            document.body.style.setProperty("--accent", "var(--color-sunset-yellow)");
         }
     }
 
@@ -65,10 +65,10 @@ export function renderNowPlaying(refs, state) {
     const album = translateLoadingPlaceholder(track.album, t);
 
     setText(refs.title, title || t("now_playing.nothing_playing"));
-    setText(refs.artist, artist ? (album ? `${artist} · ${album}` : artist) : "");
+    setText(refs.artist, artist ? (album ? `${artist}, ${album}` : artist) : "");
     setText(refs.pos, fmt(track.position_ms));
     setText(refs.dur, fmt(track.duration_ms));
-    refs.fill.style.width = progressRatio(track.position_ms, track.duration_ms) * 100 + "%";
+    refs.fill.style.transform = `scaleX(${progressRatio(track.position_ms, track.duration_ms)})`;
 
     const want = playing ? "pause" : "play";
     if (refs.play.dataset.icon !== want) {
@@ -79,19 +79,19 @@ export function renderNowPlaying(refs, state) {
 
     if (refs.mini) {
         setText(refs.mini.title, title || t("now_playing.nothing_playing"));
-        setText(refs.mini.artist, artist ? (album ? `${artist} · ${album}` : artist) : "");
+        setText(refs.mini.artist, artist ? (album ? `${artist}, ${album}` : artist) : "");
 
         if (hasArt) {
             if (refs.mini.art.getAttribute("src") !== src) {
                 refs.mini.art.src = src;
             }
         } else {
-            refs.mini.art.src = "../assets/default_artwork_128.png";
+            refs.mini.art.src = "assets/default_artwork_128.png";
         }
 
         setText(refs.mini.pos, fmt(track.position_ms));
         setText(refs.mini.dur, fmt(track.duration_ms));
-        refs.mini.fill.style.width = progressRatio(track.position_ms, track.duration_ms) * 100 + "%";
+        refs.mini.fill.style.transform = `scaleX(${progressRatio(track.position_ms, track.duration_ms)})`;
 
         if (refs.mini.play.dataset.icon !== want) {
             refs.mini.play.dataset.icon = want;

@@ -16,7 +16,7 @@ export function depRow(tool) {
     cls = "err";
   }
   const fill = el("div", { class: "dep-fill" });
-  fill.style.width = (tool.downloading && tool.total_bytes ? (tool.downloaded_bytes / tool.total_bytes) * 100 : 0) + "%";
+  fill.style.transform = `scaleX(${tool.downloading && tool.total_bytes ? tool.downloaded_bytes / tool.total_bytes : 0})`;
   return el("div", { class: "dep-row" }, [
     el("span", { class: "dep-name" }, tool.name),
     el("span", { class: "dep-state " + cls }, label),

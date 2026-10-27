@@ -52,7 +52,7 @@ function stateText(s) {
 
   const detail = detailLine(s);
   if (detail) parts.push(detail);
-  return parts.join(" · ");
+  return parts.join(", ");
 }
 
 export function visibleSources(state, cfg) {

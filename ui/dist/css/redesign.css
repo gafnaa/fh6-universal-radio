@@ -620,6 +620,51 @@ textarea:disabled {
     margin-top: 0;
 }
 
+.youtube-oauth {
+    gap: var(--space-xs);
+}
+
+.youtube-oauth h3 {
+    margin: 0;
+    font-size: var(--text-md);
+}
+
+.youtube-playlist-list {
+    display: grid;
+    gap: var(--space-2xs);
+    max-height: 18rem;
+    overflow: auto;
+    padding: var(--space-2xs);
+    border: 1px solid var(--color-rule);
+    border-radius: var(--radius-input);
+}
+
+.youtube-playlist-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-width: 0;
+    padding: var(--space-xs);
+    border-radius: var(--radius-input);
+    background: var(--color-paper-2);
+}
+
+.youtube-playlist-details {
+    display: grid;
+    min-width: 0;
+}
+
+.youtube-playlist-details strong,
+.youtube-playlist-details small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.youtube-playlist-details small {
+    color: var(--color-ink-2);
+}
+
 .roots {
     display: flex;
     flex: 1;

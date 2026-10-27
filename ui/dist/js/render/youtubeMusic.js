@@ -42,6 +42,20 @@ export function createYoutubeMusic(main, ctx) {
         dataset: { i18n: "settings.import_stations", i18nTitle: "settings.import_stations_title" },
     }, t("settings.import_stations"));
     const importFileInput = el("input", { type: "file", accept: ".json", hidden: true });
+    const oauthStatus = el("p", { class: "muted" }, t("youtube_music.not_connected"));
+    const oauthHint = el("p", { class: "muted" }, t("youtube_music.oauth_setup"));
+    const connectBtn = el("button", { type: "button", class: "btn filled", dataset: { i18n: "youtube_music.connect_google" } }, t("youtube_music.connect_google"));
+    const discoverBtn = el("button", { type: "button", class: "btn ghost", disabled: true, dataset: { i18n: "youtube_music.find_playlists" } }, t("youtube_music.find_playlists"));
+    const disconnectBtn = el("button", { type: "button", class: "btn ghost", hidden: true, dataset: { i18n: "youtube_music.disconnect" } }, t("youtube_music.disconnect"));
+    const playlistStatus = el("p", { class: "muted", hidden: true });
+    const playlistList = el("div", { class: "youtube-playlist-list", hidden: true });
+    const importSelectedBtn = el("button", { type: "button", class: "btn filled", disabled: true, dataset: { i18n: "youtube_music.import_selected" } }, t("youtube_music.import_selected"));
+    const selectedCount = el("span", { class: "muted" });
+    let oauthConnected = false;
+    let oauthChecked = false;
+    let oauthStarting = false;
+    let discoveredPlaylists = [];
+    const selectedPlaylistIds = new Set();
     let lastDetails = null;
 
     function renderSummary() {
@@ -98,6 +112,15 @@ export function createYoutubeMusic(main, ctx) {
         el("div", { class: "row stationtools" }, [newBtn, duplicateBtn, renameBtn, deleteBtn]),
         el("div", { class: "row stationtools" }, [exportBtn, importBtn]),
         importFileInput,
+        el("div", { class: "youtube-oauth editor" }, [
+            el("h3", { dataset: { i18n: "youtube_music.account_playlists" } }, t("youtube_music.account_playlists")),
+            oauthHint,
+            el("div", { class: "row stationtools" }, [connectBtn, discoverBtn, disconnectBtn]),
+            oauthStatus,
+            playlistStatus,
+            playlistList,
+            el("div", { class: "row stationtools" }, [selectedCount, importSelectedBtn]),
+        ]),
         el("div", { class: "editor" }, [
             el("label", { class: "field-label", dataset: { i18n: "youtube_music.playlist_or_video_url" } }, t("youtube_music.playlist_or_video_url")),
             urlInput,
@@ -121,6 +144,123 @@ export function createYoutubeMusic(main, ctx) {
             toast(t("youtube_music.saved_stations"));
         } catch {
             // Error handling already deferred to the station manager
+        }
+    });
+
+    function syncOAuthControls() {
+        const clientId = ctx.getConfig?.()?.youtube_music?.oauth_client_id?.trim() || "";
+        connectBtn.disabled = oauthStarting || oauthConnected || !clientId;
+        discoverBtn.disabled = !oauthConnected;
+        disconnectBtn.hidden = !oauthConnected;
+        oauthStatus.textContent = oauthStarting
+            ? t("youtube_music.sign_in_pending")
+            : (oauthConnected ? t("youtube_music.connected") : t("youtube_music.not_connected"));
+        oauthHint.textContent = clientId ? t("youtube_music.oauth_ready") : t("youtube_music.oauth_setup");
+        selectedCount.textContent = selectedPlaylistIds.size
+            ? t("youtube_music.selected_count", { count: String(selectedPlaylistIds.size) }) : "";
+        importSelectedBtn.disabled = !oauthConnected || selectedPlaylistIds.size === 0;
+    }
+
+    async function refreshOAuthStatus() {
+        try {
+            const status = await api.youtubeMusic.oauthStatus();
+            oauthConnected = !!status.connected;
+        } catch {
+            oauthConnected = false;
+        }
+        oauthChecked = true;
+        syncOAuthControls();
+    }
+
+    function renderOwnedPlaylists(playlists) {
+        discoveredPlaylists = playlists;
+        selectedPlaylistIds.clear();
+        playlistList.replaceChildren();
+        playlistList.hidden = false;
+        playlistStatus.hidden = false;
+        playlistStatus.textContent = playlists.length
+            ? t("youtube_music.playlists_found", { count: String(playlists.length) })
+            : t("youtube_music.no_playlists");
+        for (const playlist of playlists) {
+            const checkbox = el("input", { type: "checkbox", value: playlist.id });
+            checkbox.addEventListener("change", () => {
+                if (checkbox.checked) selectedPlaylistIds.add(playlist.id);
+                else selectedPlaylistIds.delete(playlist.id);
+                syncOAuthControls();
+            });
+            const details = el("span", { class: "youtube-playlist-details" }, [
+                el("strong", {}, playlist.title || playlist.id),
+                el("small", {}, t("youtube_music.playlist_item_count", { count: String(playlist.item_count ?? 0) })),
+            ]);
+            playlistList.append(el("label", { class: "youtube-playlist-item" }, [checkbox, details]));
+        }
+        syncOAuthControls();
+    }
+
+    connectBtn.addEventListener("click", async () => {
+        oauthStarting = true;
+        syncOAuthControls();
+        try {
+            await api.youtubeMusic.oauthStart();
+            // OAuth opens in the system browser on the game PC. Poll until its
+            // loopback callback stores the token, or leave the status message.
+            for (let attempt = 0; attempt < 60; attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                await refreshOAuthStatus();
+                if (oauthConnected) break;
+            }
+        } catch (e) {
+            toast(e.message, true);
+        } finally {
+            oauthStarting = false;
+            syncOAuthControls();
+        }
+    });
+
+    discoverBtn.addEventListener("click", async () => {
+        discoverBtn.disabled = true;
+        playlistStatus.hidden = false;
+        playlistStatus.textContent = t("youtube_music.loading_playlists");
+        try {
+            const result = await api.youtubeMusic.ownedPlaylists();
+            renderOwnedPlaylists(result.playlists || []);
+        } catch (e) {
+            playlistStatus.textContent = e.message;
+            playlistList.hidden = true;
+        } finally {
+            syncOAuthControls();
+        }
+    });
+
+    disconnectBtn.addEventListener("click", async () => {
+        try {
+            await api.youtubeMusic.oauthDisconnect();
+            oauthConnected = false;
+            discoveredPlaylists = [];
+            selectedPlaylistIds.clear();
+            playlistList.replaceChildren();
+            playlistList.hidden = true;
+            playlistStatus.hidden = true;
+            syncOAuthControls();
+        } catch (e) {
+            toast(e.message, true);
+        }
+    });
+
+    importSelectedBtn.addEventListener("click", async () => {
+        if (!selectedPlaylistIds.size) return;
+        importSelectedBtn.disabled = true;
+        try {
+            const result = await api.youtubeMusic.importOwnedPlaylists([...selectedPlaylistIds]);
+            await station.load(true);
+            toast(t("youtube_music.imported_playlists", { count: String(result.imported ?? 0) }));
+            selectedPlaylistIds.clear();
+            renderOwnedPlaylists(discoveredPlaylists);
+            await ctx.onSaved?.();
+        } catch (e) {
+            toast(e.message, true);
+        } finally {
+            syncOAuthControls();
         }
     });
 
@@ -161,6 +301,8 @@ export function createYoutubeMusic(main, ctx) {
         card.hidden = !isActive;
         if (!isActive) return;
         station.load();
+        if (!oauthChecked) refreshOAuthStatus();
+        syncOAuthControls();
         const details = state?.sources?.available?.find(s => s.name === "youtube_music")?.details;
         station.sync(details);
     }

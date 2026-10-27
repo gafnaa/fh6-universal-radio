@@ -70,6 +70,7 @@ struct YouTubeMusicConfig {
     bool enabled = false;
     std::filesystem::path cookies_path;
     std::filesystem::path yt_dlp_path; // empty = look up on PATH
+    std::string oauth_client_id; // Google OAuth Desktop app client ID; public identifier
     std::vector<YouTubeStation> stations;
     std::string active_station; // station name; empty/unknown => first station
     bool shuffle = true;

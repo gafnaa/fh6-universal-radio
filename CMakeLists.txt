@@ -53,6 +53,7 @@ add_library(version SHARED
     src/ring_buffer.cpp
     src/subprocess.cpp
     src/net/http_get.cpp
+    src/youtube_oauth.cpp
     src/audio_source_manager.cpp
     src/fmod/pe_image.cpp
     src/fmod/sig_scanner.cpp
@@ -88,7 +89,7 @@ target_include_directories(version PRIVATE
     third_party/kiero
 )
 
-target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp ole32 uuid ksuser runtimeobject)
+target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp crypt32 shell32 ole32 uuid ksuser runtimeobject)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version

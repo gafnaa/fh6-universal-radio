@@ -11,6 +11,7 @@
 #include "fh6/sources/external_media_session.hpp"
 #include "fh6/sources/spotify_source.hpp"
 #include "fh6/sources/online_radio_source.hpp"
+#include "fh6/youtube_oauth.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -214,6 +215,7 @@ json config_to_json(const Config& c) {
              {"enabled", c.youtube_music.enabled},
              {"cookies_path", path_s(c.youtube_music.cookies_path)},
              {"yt_dlp_path", path_s(c.youtube_music.yt_dlp_path)},
+             {"oauth_client_id", c.youtube_music.oauth_client_id},
              {"active_station", c.youtube_music.active_station},
              {"stations", yt_stations_to_json(c.youtube_music.stations)},
              {"shuffle", c.youtube_music.shuffle},
@@ -356,6 +358,7 @@ void apply_patch(Config& c, const json& j) {
         c.youtube_music.enabled      = pull(*it, "enabled", c.youtube_music.enabled);
         c.youtube_music.cookies_path = pull_path(*it, "cookies_path", c.youtube_music.cookies_path);
         c.youtube_music.yt_dlp_path  = pull_path(*it, "yt_dlp_path", c.youtube_music.yt_dlp_path);
+        c.youtube_music.oauth_client_id = pull(*it, "oauth_client_id", c.youtube_music.oauth_client_id);
         c.youtube_music.active_station = pull(*it, "active_station", c.youtube_music.active_station);
         if (auto sts = it->find("stations"); sts != it->end() && sts->is_array()) {
             std::vector<YouTubeStation> parsed;
@@ -476,6 +479,7 @@ constexpr std::string_view status_text(int code) noexcept {
     switch (code) {
         case 200: return "OK";
         case 400: return "Bad Request";
+        case 403: return "Forbidden";
         case 404: return "Not Found";
         case 502: return "Bad Gateway";
         default: return "Internal Server Error";
@@ -589,13 +593,16 @@ struct HttpServer::Impl {
     ConfigStore& store;
     DependencyManager& deps;
     std::filesystem::path ui_dist;
+    youtube_oauth::Client youtube_oauth;
     std::atomic<bool> stopping{false};
+    std::atomic<uint16_t> bound_port{0};
     SOCKET srv_sock = INVALID_SOCKET;
     std::thread thr;
 
     Impl(AudioSourceManager& m, fmod_bridge::DSPBridge& b, ConfigStore& s, DependencyManager& d,
-         uint16_t port, std::filesystem::path dist)
-        : mgr{m}, bridge{b}, store{s}, deps{d}, ui_dist{std::move(dist)} {
+         uint16_t port, std::filesystem::path dist, std::filesystem::path data_dir)
+        : mgr{m}, bridge{b}, store{s}, deps{d}, ui_dist{std::move(dist)},
+          youtube_oauth{std::move(data_dir) / "youtube-oauth-token.dpapi"} {
         thr = std::thread{[this, port] { run(port); }};
     }
     ~Impl() {
@@ -683,6 +690,7 @@ struct HttpServer::Impl {
             WSACleanup();
             return;
         }
+        bound_port.store(bound, std::memory_order_release);
         log::info("[http] listening on http://0.0.0.0:{} (LAN-reachable)", bound);
 
         while (!stopping.load(std::memory_order_acquire)) {
@@ -725,6 +733,37 @@ struct HttpServer::Impl {
     void dispatch(SOCKET client, const Request& req, Ok&& ok, Fail&& fail) {
         const auto& m = req.method;
         const auto& p = req.path;
+
+        if (m == "GET" && p.starts_with("/?")) {
+            sockaddr_in peer{};
+            int peer_size = sizeof(peer);
+            if (getpeername(client, reinterpret_cast<sockaddr*>(&peer), &peer_size) != 0 ||
+                peer.sin_family != AF_INET || ntohl(peer.sin_addr.s_addr) != INADDR_LOOPBACK) {
+                return send_response(client, 403, "This OAuth callback is only available on this PC.",
+                                     "text/plain; charset=utf-8");
+            }
+            const auto result = youtube_oauth.complete(p);
+            auto escape_html = [](std::string_view value) {
+                std::string out;
+                for (char c : value) {
+                    switch (c) {
+                        case '&': out += "&amp;"; break;
+                        case '<': out += "&lt;"; break;
+                        case '>': out += "&gt;"; break;
+                        case '"': out += "&quot;"; break;
+                        case '\'': out += "&#39;"; break;
+                        default: out.push_back(c); break;
+                    }
+                }
+                return out;
+            };
+            const auto title = result.ok ? "YouTube connected" : "YouTube sign-in failed";
+            const auto body = "<!doctype html><html><meta charset=utf-8><title>" + std::string{title} +
+                              "</title><body style=\"font:16px system-ui;max-width:36rem;margin:12vh auto;padding:0 1.5rem\"><h1>" +
+                              title + "</h1><p>" + escape_html(result.message) +
+                              "</p><p>You can close this tab and return to FH6 Universal Radio.</p></body></html>";
+            return send_response(client, result.ok ? 200 : 400, body, "text/html; charset=utf-8");
+        }
 
         if (m == "OPTIONS") return send_response(client, 200, "", "text/plain");
 
@@ -911,6 +950,82 @@ struct HttpServer::Impl {
             yt->play();
             mgr.switch_to("youtube_music");
             return ok();
+        }
+        if (m == "GET" && p == "/api/source/youtube_music/oauth/status") {
+            return ok(json{{"connected", youtube_oauth.connected()}});
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/oauth/start") {
+            const auto config = store.snapshot().youtube_music;
+            const auto result = youtube_oauth.start(config.oauth_client_id,
+                                                    bound_port.load(std::memory_order_acquire));
+            return result.ok ? ok(json{{"message", result.message}}) : fail(400, result.message);
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/oauth/disconnect") {
+            youtube_oauth.disconnect();
+            return ok();
+        }
+        if (m == "GET" && p == "/api/source/youtube_music/oauth/playlists") {
+            const auto config = store.snapshot().youtube_music;
+            std::string error;
+            auto playlists = youtube_oauth.list_owned_playlists(config.oauth_client_id, error);
+            if (!playlists) return fail(502, error);
+            json items = json::array();
+            for (const auto& playlist : *playlists) {
+                items.push_back(json{{"id", playlist.id}, {"title", playlist.title},
+                                     {"item_count", playlist.item_count}});
+            }
+            return ok(json{{"playlists", std::move(items)}});
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/oauth/import") {
+            const auto body = json::parse(req.body);
+            if (!body.contains("playlist_ids") || !body.at("playlist_ids").is_array())
+                return fail(400, "playlist_ids must be an array");
+            std::vector<std::string> requested;
+            for (const auto& id : body.at("playlist_ids")) {
+                if (id.is_string()) requested.push_back(id.get<std::string>());
+            }
+            if (requested.empty()) return fail(400, "Select at least one playlist");
+            const auto config = store.snapshot().youtube_music;
+            std::string error;
+            auto playlists = youtube_oauth.list_owned_playlists(config.oauth_client_id, error);
+            if (!playlists) return fail(502, error);
+            std::vector<YouTubeStation> additions;
+            for (const auto& playlist : *playlists) {
+                if (std::find(requested.begin(), requested.end(), playlist.id) == requested.end())
+                    continue;
+                const auto url = "https://music.youtube.com/playlist?list=" + playlist.id;
+                const auto playlist_param = "list=" + playlist.id;
+                const bool already_added = std::any_of(config.stations.begin(), config.stations.end(),
+                                                       [&](const YouTubeStation& station) {
+                    const auto pos = station.url.find(playlist_param);
+                    if (pos == std::string::npos) return false;
+                    const auto end = pos + playlist_param.size();
+                    return end == station.url.size() || station.url[end] == '&';
+                });
+                if (!already_added) additions.push_back({playlist.title, url});
+            }
+            if (additions.empty()) return ok(json{{"imported", 0}});
+            size_t imported = 0;
+            store.patch([&](Config& c) {
+                for (auto station : additions) {
+                    if (station.name.empty()) station.name = "YouTube playlist";
+                    const auto base_name = station.name;
+                    size_t suffix = 2;
+                    auto name_used = [&](const std::string& name) {
+                        return std::any_of(c.youtube_music.stations.begin(), c.youtube_music.stations.end(),
+                                           [&](const YouTubeStation& existing) {
+                            return existing.name == name;
+                        });
+                    };
+                    while (name_used(station.name))
+                        station.name = base_name + " (" + std::to_string(suffix++) + ")";
+                    c.youtube_music.stations.push_back(std::move(station));
+                    ++imported;
+                }
+            });
+            if (auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music"))
+                yt->set_config(store.snapshot().youtube_music);
+            return ok(json{{"imported", imported}});
         }
         if (m == "POST" && p == "/api/source/youtube_music/shuffle") {
             auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
@@ -1145,8 +1260,10 @@ struct HttpServer::Impl {
 };
 
 HttpServer::HttpServer(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigStore& cfg,
-                       uint16_t port, std::filesystem::path ui_dist, DependencyManager& deps)
-    : impl_{std::make_unique<Impl>(mgr, bridge, cfg, deps, port, std::move(ui_dist))} {}
+                       uint16_t port, std::filesystem::path ui_dist, DependencyManager& deps,
+                       std::filesystem::path data_dir)
+    : impl_{std::make_unique<Impl>(mgr, bridge, cfg, deps, port, std::move(ui_dist),
+                                   std::move(data_dir))} {}
 
 HttpServer::~HttpServer() = default;
 

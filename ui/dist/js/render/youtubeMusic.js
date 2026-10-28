@@ -3,6 +3,7 @@ import { $, el } from "../lib/dom.js";
 import { icons } from "../icons.js";
 import { toast } from "../toast.js";
 import { t } from "../i18n.js";
+import { fmt } from "../lib/format.js";
 import { createStationManager } from "./stationManager.js";
 
 /**
@@ -25,6 +26,18 @@ function newStation(name) {
  * @param {() => Promise<void>} [ctx.onSaved] - Optional callback triggered after successful mutations
  */
 export function createYoutubeMusic(main, ctx) {
+    const songSearchInput = el("input", {
+        type: "search", class: "path-input",
+        placeholder: t("youtube_music.search_placeholder"),
+        dataset: { i18nPlaceholder: "youtube_music.search_placeholder" },
+        autocomplete: "off",
+    });
+    const searchBtn = el("button", {
+        type: "submit", class: "btn filled", dataset: { i18n: "youtube_music.search" },
+    }, t("youtube_music.search"));
+    const searchForm = el("form", { class: "row youtube-search-form" }, [songSearchInput, searchBtn]);
+    const searchStatus = el("p", { class: "muted", role: "status", "aria-live": "polite", hidden: true });
+    const searchResults = el("div", { class: "youtube-search-results", hidden: true });
     const urlInput = el("input", { type: "text", class: "path-input", placeholder: "https://music.youtube.com/playlist?list=...", autocomplete: "off" });
     const castBtn = el("button", { type: "button", class: "btn ghost", dataset: { i18n: "btn.cast" } }, t("btn.cast"));
     const saveBtn = el("button", { type: "button", class: "btn filled", dataset: { i18n: "btn.save" } }, t("btn.save"));
@@ -112,6 +125,12 @@ export function createYoutubeMusic(main, ctx) {
         el("div", { class: "row stationtools" }, [newBtn, duplicateBtn, renameBtn, deleteBtn]),
         el("div", { class: "row stationtools" }, [exportBtn, importBtn]),
         importFileInput,
+        el("div", { class: "editor youtube-search" }, [
+            el("label", { class: "field-label", dataset: { i18n: "youtube_music.search_songs" } }, t("youtube_music.search_songs")),
+            searchForm,
+            searchStatus,
+            searchResults,
+        ]),
         el("div", { class: "youtube-oauth editor" }, [
             el("h3", { dataset: { i18n: "youtube_music.account_playlists" } }, t("youtube_music.account_playlists")),
             oauthHint,
@@ -136,6 +155,87 @@ export function createYoutubeMusic(main, ctx) {
     const sourcesCard = $("#sources", main)?.closest(".card");
     if (sourcesCard) sourcesCard.insertAdjacentElement("afterend", card);
     else main.append(card);
+
+    function renderSearchResults(results) {
+        searchResults.replaceChildren(...results.map(result => {
+            const details = [result.artist, result.duration_ms ? fmt(result.duration_ms) : ""]
+                .filter(Boolean)
+                .join(" · ");
+            const playBtn = el("button", {
+                type: "button", class: "btn ghost", dataset: { i18n: "youtube_music.play_result" },
+            }, t("youtube_music.play_result"));
+            const addBtn = el("button", {
+                type: "button", class: "btn filled", dataset: { i18n: "youtube_music.add_to_queue" },
+            }, t("youtube_music.add_to_queue"));
+            playBtn.addEventListener("click", async () => {
+                playBtn.disabled = true;
+                try {
+                    await api.youtubeMusic.cast(`https://www.youtube.com/watch?v=${encodeURIComponent(result.id)}`);
+                    toast(t("toast.casting", { service: "YouTube Music" }));
+                    await ctx.onSaved?.();
+                    await station.loadQueue();
+                } catch (e) {
+                    toast(e.message, true);
+                } finally {
+                    playBtn.disabled = false;
+                }
+            });
+            addBtn.addEventListener("click", async () => {
+                addBtn.disabled = true;
+                try {
+                    await api.youtubeMusic.addSearchResult(result);
+                    await ctx.onSaved?.();
+                    await station.loadQueue();
+                    toast(t("youtube_music.added_to_queue", { title: result.title }));
+                } catch (e) {
+                    toast(e.message, true);
+                } finally {
+                    addBtn.disabled = false;
+                }
+            });
+
+            return el("article", { class: "youtube-search-result" }, [
+                el("img", {
+                    class: "youtube-search-cover", src: result.thumbnail_url || "", alt: "",
+                    loading: "lazy", "aria-hidden": "true",
+                }),
+                el("div", { class: "youtube-search-result__meta" }, [
+                    el("strong", {}, result.title || t("label.unknown_title")),
+                    details ? el("small", {}, details) : null,
+                ]),
+                el("div", { class: "youtube-search-result__actions" }, [playBtn, addBtn]),
+            ]);
+        }));
+        searchResults.hidden = results.length === 0;
+    }
+
+    searchForm.addEventListener("submit", async event => {
+        event.preventDefault();
+        const query = songSearchInput.value.trim();
+        if (!query) {
+            searchStatus.textContent = t("youtube_music.search_required");
+            searchStatus.hidden = false;
+            searchResults.replaceChildren();
+            searchResults.hidden = true;
+            return;
+        }
+
+        searchBtn.disabled = true;
+        searchStatus.textContent = t("youtube_music.searching");
+        searchStatus.hidden = false;
+        searchResults.replaceChildren();
+        searchResults.hidden = true;
+        try {
+            const response = await api.youtubeMusic.searchSongs(query);
+            const results = response.results || [];
+            renderSearchResults(results);
+            searchStatus.textContent = t("youtube_music.search_results", { count: String(results.length) });
+        } catch (e) {
+            searchStatus.textContent = e.message;
+        } finally {
+            searchBtn.disabled = false;
+        }
+    });
 
     saveBtn.addEventListener("click", async () => {
         if (station.cur()) {

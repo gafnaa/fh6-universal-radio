@@ -27,6 +27,8 @@ namespace fh6::http {
 //   POST /api/source/<name>/{play,pause,stop,next,previous}
 //
 //   POST /api/source/youtube_music/cast     body {"url":"..."}
+//   POST /api/source/youtube_music/search   body {"query":"..."}
+//   POST /api/source/youtube_music/queue/add body {"id":"...","title":"...","artist":"..."}
 //   POST /api/source/youtube_music/shuffle  body {"shuffle":true|false}
 //   GET  /api/source/youtube_music/oauth/status
 //   POST /api/source/youtube_music/oauth/start

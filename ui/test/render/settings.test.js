@@ -10,12 +10,13 @@ const form = () => document.getElementById("f");
 describe("renderSettings", () => {
   it("builds every section and the right field types", () => {
     renderSettings(form(), {
-      general: { port: 8420 },
+      general: { port: 8420, auto_fallback_on_failure: true },
       local_files: { enabled: true },
       playback: { equalizer_bands: [1, 2, 3, 4, 5], race_start_playback: "restart" },
     });
-    expect(form().querySelectorAll("fieldset").length).toBe(9);
+    expect(form().querySelectorAll("fieldset").length).toBe(12);
     expect(form().querySelector("#f-general-port").value).toBe("8420");
+    expect(form().querySelector("#f-general-auto_fallback_on_failure").checked).toBe(true);
     expect(form().querySelector("#f-local_files-enabled").checked).toBe(true);
 
     const select = form().querySelector("#f-playback-race_start_playback");
@@ -46,7 +47,7 @@ describe("renderSettings", () => {
 describe("collectSettings", () => {
   it("collects typed values and the full EQ band array", () => {
     renderSettings(form(), {
-      general: { port: 8420 },
+      general: { port: 8420, auto_fallback_on_failure: false },
       audio: { output_gain: 0.5 },
       local_files: { enabled: false },
       playback: { equalizer_bands: [0, 0, 0, 0, 0] },
@@ -58,6 +59,7 @@ describe("collectSettings", () => {
     const patch = collectSettings(form());
     expect(patch.local_files.enabled).toBe(true);
     expect(patch.general.port).toBe(9000);
+    expect(patch.general.auto_fallback_on_failure).toBe(false);
     expect(patch.audio.output_gain).toBe(0.5);
     expect(patch.playback.equalizer_bands).toEqual([3, 0, 0, 0, 0]);
   });

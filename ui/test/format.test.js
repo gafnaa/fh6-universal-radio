@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmt, clamp, percent, progressRatio, db } from "../dist/js/format.js";
+import { fmt, clamp, percent, progressRatio, db } from "../dist/js/lib/format.js";
 
 describe("format", () => {
   it("fmt renders ms as m:ss and guards empty/negative", () => {

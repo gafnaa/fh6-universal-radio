@@ -29,6 +29,7 @@ struct OnlineRadioSource::Pipe {
     std::string stderr_buf;
     std::uint64_t bytes_written = 0;
     bool ended = false;
+    std::chrono::steady_clock::time_point last_data_at = std::chrono::steady_clock::now();
 
     ~Pipe() {
         if (read_pipe) CloseHandle(read_pipe);
@@ -71,29 +72,98 @@ void OnlineRadioSource::set_ffmpeg_path(std::filesystem::path p) {
     ffmpeg_path_ = std::move(p);
 }
 
-void OnlineRadioSource::set_target(std::string url, std::string name, std::string logo) {
+void OnlineRadioSource::set_target(std::string url, std::string name, std::string logo,
+                                   std::vector<std::string> alternate_urls) {
     std::scoped_lock lk{mu_};
-    target_url_  = std::move(url);
+    target_url_ = std::move(url);
     target_name_ = std::move(name);
     target_logo_ = std::move(logo);
+    target_alternate_urls_ = std::move(alternate_urls);
+    active_url_index_ = 0;
+    reset_recovery_locked();
+}
+
+std::vector<std::string> OnlineRadioSource::stream_urls_locked() const {
+    std::vector<std::string> urls;
+    const auto append = [&urls](const std::string& url) {
+        if (is_streamable_url(url) &&
+            std::find(urls.begin(), urls.end(), url) == urls.end()) {
+            urls.push_back(url);
+        }
+    };
+    if (!target_url_.empty()) {
+        append(target_url_);
+        for (const auto& url : target_alternate_urls_) append(url);
+    } else if (!cfg_.stations.empty() && current_station_idx_ < cfg_.stations.size()) {
+        const auto& station = cfg_.stations[current_station_idx_];
+        append(station.url);
+        for (const auto& url : station.alternate_urls) append(url);
+    }
+    return urls;
+}
+
+void OnlineRadioSource::reset_recovery_locked() {
+    recovery_attempt_ = 0;
+    retry_pending_ = false;
+    retry_at_ = {};
+    healthy_since_ = {};
+    recovery_ = {};
+}
+
+void OnlineRadioSource::schedule_retry_locked(std::string message) {
+    pipe_.reset();
+    if (recovery_attempt_ >= max_recovery_attempts_) {
+        retry_pending_ = false;
+        recovery_.retrying = false;
+        recovery_.failed = true;
+        recovery_.attempt = max_recovery_attempts_;
+        recovery_.max_attempts = max_recovery_attempts_;
+        recovery_.message = std::move(message);
+        state_.store(PlaybackState::stopped, std::memory_order_release);
+        log::error("[online_radio] stream recovery exhausted: {}", recovery_.message);
+        return;
+    }
+
+    const auto urls = stream_urls_locked();
+    if (!urls.empty()) active_url_index_ = (active_url_index_ + 1) % urls.size();
+    ++recovery_attempt_;
+    const auto delay_seconds = std::min<uint32_t>(1u << std::min(recovery_attempt_ - 1, 4u), 16u);
+    retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds{delay_seconds};
+    retry_pending_ = true;
+    recovery_.retrying = true;
+    recovery_.failed = false;
+    recovery_.attempt = recovery_attempt_;
+    recovery_.max_attempts = max_recovery_attempts_;
+    recovery_.message = std::move(message);
+    healthy_since_ = {};
+    position_ms_.store(0, std::memory_order_release);
+    state_.store(PlaybackState::buffering, std::memory_order_release);
+    log::warn("[online_radio] retry {}/{} in {}s: {}", recovery_attempt_,
+              max_recovery_attempts_, delay_seconds, recovery_.message);
 }
 
 void OnlineRadioSource::start_pipe_locked() {
     stop_pipe_locked();
 
-    std::string play_url;
-    bool is_direct = false;
-    if (!target_url_.empty()) {
-        play_url  = target_url_;
-        is_direct = true;
-    } else if (!cfg_.stations.empty()) {
-        play_url = cfg_.stations[current_station_idx_].url;
-    } else {
+    const auto urls = stream_urls_locked();
+    if (urls.empty()) {
+        recovery_.retrying = false;
+        recovery_.failed = true;
+        recovery_.attempt = recovery_attempt_;
+        recovery_.max_attempts = max_recovery_attempts_;
+        recovery_.message = "No HTTP(S) stream URL is configured";
+        state_.store(PlaybackState::stopped, std::memory_order_release);
         return;
     }
+    if (active_url_index_ >= urls.size()) active_url_index_ = 0;
+    const std::string play_url = urls[active_url_index_];
+    const bool is_direct = !target_url_.empty();
+    const auto fail_start = [this](std::string message) {
+        schedule_retry_locked(std::move(message));
+    };
 
     if (!is_streamable_url(play_url)) {
-        log::warn("[online_radio] refusing non-http(s) url: {}", play_url);
+        fail_start("The stream URL is not HTTP(S)");
         return;
     }
 
@@ -116,7 +186,8 @@ void OnlineRadioSource::start_pipe_locked() {
 
     // -loglevel verbose + -icy 1 make ffmpeg emit "ICY Info: StreamTitle='...'".
     std::wstring ff_cmd = quote(ff) + L" -hide_banner -loglevel verbose -icy 1 "
-                          L"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+                          L"-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 "
+                          L"-reconnect_delay_max 5 -rw_timeout 15000000 "
                           L"-i " + quote(widen(play_url)) + L" "
                           L"-f s16le -acodec pcm_s16le -ar 48000 -ac 2 ";
     if (volume_norm_.load(std::memory_order_acquire)) {
@@ -144,19 +215,23 @@ void OnlineRadioSource::start_pipe_locked() {
     // direct spawn fallback: only executes if the worker is dead/unavailable.
     pipe->job = create_kill_on_close_job();
     if (!pipe->job) {
-        log::warn("[online_radio] CreateJobObject failed");
+        fail_start("Could not create an FFmpeg process job");
         return;
     }
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE ff_out_r = nullptr, ff_out_w = nullptr;
     HANDLE err_r = nullptr, err_w = nullptr;
 
-    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) return;
+    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) {
+        fail_start("Could not create the FFmpeg audio pipe");
+        return;
+    }
     SetHandleInformation(ff_out_r, 0, HANDLE_FLAG_INHERIT);
 
     if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) {
         CloseHandle(ff_out_r);
         CloseHandle(ff_out_w);
+        fail_start("Could not create the FFmpeg error pipe");
         return;
     }
     SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
@@ -173,6 +248,7 @@ void OnlineRadioSource::start_pipe_locked() {
         CloseHandle(ff_out_r);
         CloseHandle(err_r);
         if (nul_in) CloseHandle(nul_in);
+        fail_start(describe_launch_failure(std::wstring{ff}, ec_ff, !ffmpeg_path_.empty()));
         return;
     }
 
@@ -195,26 +271,40 @@ void OnlineRadioSource::stop_pipe_locked() {
 
 void OnlineRadioSource::play() {
     std::scoped_lock lk{mu_};
-    if (!pipe_) start_pipe_locked();
+    if (!pipe_ && !retry_pending_) {
+        active_url_index_ = 0;
+        reset_recovery_locked();
+        start_pipe_locked();
+    }
     if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
 }
 
 void OnlineRadioSource::pause() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    reset_recovery_locked();
     stop_pipe_locked();
 }
 
 void OnlineRadioSource::stop() {
     std::scoped_lock lk{mu_};
+    const auto previous_recovery = recovery_;
+    retry_pending_ = false;
     stop_pipe_locked();
     target_url_.clear();
     target_name_.clear();
     target_logo_.clear();
+    target_alternate_urls_.clear();
+    reset_recovery_locked();
+    if (previous_recovery.failed) recovery_ = previous_recovery;
 }
 
 void OnlineRadioSource::next() {
     std::scoped_lock lk{mu_};
     target_url_.clear();
+    target_alternate_urls_.clear();
+    reset_recovery_locked();
+    active_url_index_ = 0;
     if (cfg_.stations.empty()) return;
 
     current_station_idx_ = (current_station_idx_ + 1) % cfg_.stations.size();
@@ -225,6 +315,9 @@ void OnlineRadioSource::next() {
 void OnlineRadioSource::previous() {
     std::scoped_lock lk{mu_};
     target_url_.clear();
+    target_alternate_urls_.clear();
+    reset_recovery_locked();
+    active_url_index_ = 0;
     if (cfg_.stations.empty()) return;
 
     current_station_idx_ =
@@ -248,6 +341,11 @@ std::vector<std::string> OnlineRadioSource::song_history() const {
     return {song_history_.begin(), song_history_.end()};
 }
 
+RecoveryStatus OnlineRadioSource::recovery_status() const {
+    std::scoped_lock lk{mu_};
+    return recovery_;
+}
+
 void OnlineRadioSource::set_playback_options(const PlaybackConfig& opts) {
     {
         std::scoped_lock lk{mu_};
@@ -258,10 +356,17 @@ void OnlineRadioSource::set_playback_options(const PlaybackConfig& opts) {
 }
 
 void OnlineRadioSource::pump(RingBuffer& ring) {
-    auto st = state_.load(std::memory_order_acquire);
+    std::scoped_lock lk{mu_};
+    if (retry_pending_) {
+        if (std::chrono::steady_clock::now() >= retry_at_) {
+            retry_pending_ = false;
+            start_pipe_locked();
+        }
+        return;
+    }
+    const auto st = state_.load(std::memory_order_acquire);
     if (st != PlaybackState::playing && st != PlaybackState::buffering) return;
 
-    std::scoped_lock lk{mu_};
     Pipe* p = pipe_.get();
     if (!p) return;
 
@@ -401,6 +506,7 @@ void OnlineRadioSource::pump(RingBuffer& ring) {
 
     if (p->ended) {
         update_position();
+        if (ring.readable() == 0) schedule_retry_locked("Stream connection closed");
         return;
     }
 
@@ -414,6 +520,11 @@ void OnlineRadioSource::pump(RingBuffer& ring) {
 
     // transition back to buffering if the stream starved
     if (avail == 0) {
+        if (std::chrono::steady_clock::now() - p->last_data_at > std::chrono::seconds{25}) {
+            p->ended = true;
+            CloseHandle(p->read_pipe);
+            p->read_pipe = nullptr;
+        }
         if (state_.load(std::memory_order_acquire) == PlaybackState::playing &&
             ring.readable() < 16384) {
             state_.store(PlaybackState::buffering, std::memory_order_release);
@@ -445,6 +556,17 @@ void OnlineRadioSource::pump(RingBuffer& ring) {
 
         ring.write(buf, aligned);
         p->bytes_written += aligned;
+        p->last_data_at = std::chrono::steady_clock::now();
+        if (healthy_since_ == std::chrono::steady_clock::time_point{}) {
+            healthy_since_ = p->last_data_at;
+            recovery_.retrying = false;
+            recovery_.failed = false;
+            recovery_.message.clear();
+        } else if (p->last_data_at - healthy_since_ >= std::chrono::seconds{30}) {
+            recovery_attempt_ = 0;
+            recovery_ = {};
+            healthy_since_ = p->last_data_at;
+        }
         update_position();
 
         avail = avail > got ? avail - got : 0;

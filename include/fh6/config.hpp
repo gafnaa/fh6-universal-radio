@@ -39,6 +39,7 @@ struct GeneralConfig {
     uint32_t ring_buffer_mb     = 4;
     std::string default_source  = "online_radio";
     std::string fallback_source = "local_files";
+    bool auto_fallback_on_failure = false;
     std::filesystem::path ffmpeg_path; // empty = look up on PATH; shared by all sources
 };
 
@@ -109,6 +110,7 @@ struct JellyfinConfig {
 struct RadioStation {
     std::string name;
     std::string url;
+    std::vector<std::string> alternate_urls; // tried in order when the primary stream fails
     std::string favicon; // logo URL (shown as now-playing artwork)
     std::string tags;    // comma-separated genres
     std::string country; // ISO 3166-1 alpha-2 or display name

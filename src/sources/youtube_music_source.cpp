@@ -526,8 +526,14 @@ bool YouTubeMusicSource::add_search_result(std::string id, std::string title, st
         return false;
     }
 
-    const bool was_empty = queue_.empty();
     const auto url = watch_url_for_id(id);
+    if (std::any_of(queue_.begin(), queue_.end(), [&](const auto& track) {
+            return track.url == url;
+        })) {
+        error = "That song is already in the queue.";
+        return false;
+    }
+    const bool was_empty = queue_.empty();
     if (was_empty) {
         // A first search result creates a temporary one-song queue. Subsequent
         // results append to it, and normal transport/queue controls apply.

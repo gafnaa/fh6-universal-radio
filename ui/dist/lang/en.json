@@ -61,14 +61,13 @@
   "settings.restored": "Settings restored successfully!",
   "error.restore_failed": "Failed to restore settings. Invalid JSON file.",
 
-  // The "station pack" export/import only covers YouTube Music stations
-  // (it's the only library safely shareable between players).
-  "settings.export_stations": "Export stations",
-  "settings.export_stations_title": "Download a shareable pack of your YouTube Music stations",
-  "settings.import_stations": "Import stations",
-  "settings.import_stations_title": "Add YouTube Music stations from a shared pack file",
+  // Station packs carry portable radio stations and frozen queue snapshots, never local paths or credentials.
+  "settings.export_stations": "Export station pack",
+  "settings.export_stations_title": "Download YouTube Music and Jellyfin saved queues plus online-radio stations",
+  "settings.import_stations": "Import station pack",
+  "settings.import_stations_title": "Add supported stations and saved queues from a pack file",
   "settings.stations_exported": "Station pack downloaded",
-  "settings.stations_imported": "{count} station(s) added",
+  "settings.stations_imported": "{count} station(s) or queue(s) added",
   "error.invalid_station_pack": "Invalid station pack file.",
 
   // ─── Now Playing (hero + mini player) ──────────────────────────────────
@@ -77,12 +76,17 @@
   "now_playing.pause": "Pause",
   "now_playing.previous": "Previous",
   "now_playing.next": "Next",
+  "playback_history.title": "Recently played",
+  "playback_history.clear": "Clear history",
 
   // ─── Sources list ───────────────────────────────────────────────────────
   "source.title": "Sources",
   "source.no_source": "No source configured",
   "source.local_files": "Local Files",
   "source.online_radio": "Online Radio",
+  "source.youtube_music": "YouTube Music",
+  "source.jellyfin": "Jellyfin",
+  "source.spotify": "Spotify Connect",
   "source.external_audio": "External Audio",
   "source.vanilla_radio": "Vanilla Radio",
   "source.in_game_audio": "In-game Audio",
@@ -92,6 +96,10 @@
   "source.state.playing": "Playing",
   "source.state.stopped": "Stopped",
   "source.state.paused": "Paused",
+  "source.state.buffering": "Buffering",
+  "source.reconnecting": "Reconnecting ({attempt}/{max})",
+  "source.recovery_failed": "Stream failed: {message}",
+  "source.fallback_notice": "{source} failed: {message}. Switched to {fallback}.",
   "source.indexed": "indexed",
   "source.needs_auth": "Needs Auth",
   "source.auth.authenticated": "Authenticated",
@@ -202,6 +210,7 @@
   "online_radio.edit_station": "Edit station",
   "online_radio.station_name": "Name",
   "online_radio.stream_url": "Stream URL",
+  "online_radio.alternate_urls": "Backup stream URLs (one per line)",
   "online_radio.station_saved": "Station saved",
   "online_radio.station_removed": "Station removed",
   "online_radio.tuning": "Tuning into {name}…",
@@ -306,6 +315,7 @@
   "schema.general.ring_buffer": "Ring buffer (MB)",
   "schema.general.default_source": "Default source",
   "schema.general.fallback_source": "Fallback source",
+  "schema.general.auto_fallback_on_failure": "Automatically switch to the fallback source after a streaming failure",
   "schema.general.ffmpeg_path": "ffmpeg path (optional)",
 
   "schema.youtube_music.cookies_path": "cookies.txt (optional)",

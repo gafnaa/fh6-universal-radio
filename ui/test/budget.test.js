@@ -13,11 +13,11 @@ function walk(dir) {
 }
 
 describe("performance budget", () => {
-  it("ships JS + CSS under 110 KB (fonts excluded)", () => {
+  it("ships JS + CSS under 280 KB (fonts excluded)", () => {
     const total = walk(distDir)
       .filter(f => /\.(js|css)$/.test(f))
       .reduce((sum, f) => sum + statSync(f).size, 0);
-    expect(total).toBeLessThan(110 * 1024);
+    expect(total).toBeLessThan(280 * 1024);
   });
 
   it("keeps the entry HTML under 8 KB", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resetMemo } from "../../dist/js/store.js";
+import { resetMemo } from "../../dist/js/lib/store.js";
 import { renderSources, visibleSources, sourcesSignature } from "../../dist/js/render/sources.js";
 
 beforeEach(() => {
@@ -75,11 +75,61 @@ describe("renderSources", () => {
     expect(onSwitch).toHaveBeenCalledWith("jellyfin");
   });
 
+  it("shows reconnecting and exhausted-stream states on each source tile", () => {
+    renderSources(
+      node(),
+      {
+        sources: {
+          active: "online_radio",
+          available: [
+            {
+              name: "online_radio",
+              display_name: "Online Radio",
+              playback_state: "buffering",
+              auth_state: "none_required",
+              details: {
+                recovery: {
+                  retrying: true,
+                  failed: false,
+                  attempt: 2,
+                  max_attempts: 5,
+                  message: "timeout",
+                },
+              },
+            },
+            {
+              name: "youtube_music",
+              display_name: "YouTube Music",
+              playback_state: "stopped",
+              auth_state: "none_required",
+              details: {
+                recovery: {
+                  retrying: false,
+                  failed: true,
+                  attempt: 5,
+                  max_attempts: 5,
+                  message: "connection closed",
+                },
+              },
+            },
+          ],
+        },
+      },
+      {},
+      () => {},
+    );
+
+    expect(node().querySelector(".source-state.warn").textContent).toContain("Reconnecting (2/5)");
+    expect(node().querySelector(".source-state.err").textContent).toContain(
+      "Stream failed: connection closed",
+    );
+  });
+
   it("shows an empty-state message when no sources are visible", () => {
     renderSources(node(), { sources: { active: "", available: [] } }, {}, () => {});
     expect(node().querySelector(".source")).toBeNull();
     expect(node().querySelector(".source-empty")).toBeTruthy();
-    expect(node().textContent).toContain("Open Settings");
+    expect(node().textContent).toContain("No source configured");
   });
 
   it("skips DOM work when the signature is unchanged", () => {

@@ -46,7 +46,7 @@ describe("createOnlineRadio", () => {
   it("offers My Stations and Discover tabs", () => {
     const or = createOnlineRadio(document.querySelector("main"), ctx("online_radio", []));
     or.render();
-    const tabs = [...document.querySelectorAll(".or-tab")].map(t => t.textContent);
-    expect(tabs).toEqual(["My Stations", "Discover"]);
+    const tabs = [...document.querySelectorAll(".or-tab")].map(t => t.dataset.i18n);
+    expect(tabs).toEqual(["online_radio.my_stations", "online_radio.discover"]);
   });
 });

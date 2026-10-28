@@ -76,6 +76,8 @@ Config load_config(const std::filesystem::path& path) {
     cfg.general.default_source = pick<std::string>(g, "default_source", cfg.general.default_source);
     cfg.general.fallback_source =
         pick<std::string>(g, "fallback_source", cfg.general.fallback_source);
+    cfg.general.auto_fallback_on_failure =
+        pick<bool>(g, "auto_fallback_on_failure", cfg.general.auto_fallback_on_failure);
     cfg.general.ffmpeg_path = pick_path(g, "ffmpeg_path");
 
     const auto& lf                 = section(root, "local_files");
@@ -211,6 +213,7 @@ Config load_config(const std::filesystem::path& path) {
         RadioStation rs;
         rs.name     = pick<std::string>(st, "name", "");
         rs.url      = pick<std::string>(st, "url", "");
+        rs.alternate_urls = pick<std::vector<std::string>>(st, "alternate_urls", {});
         rs.favicon  = pick<std::string>(st, "favicon", "");
         rs.tags     = pick<std::string>(st, "tags", "");
         rs.country  = pick<std::string>(st, "country", "");
@@ -401,6 +404,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("ring_buffer_mb", (int64_t)cfg.general.ring_buffer_mb);
     e.kv("default_source", cfg.general.default_source);
     e.kv("fallback_source", cfg.general.fallback_source);
+    e.kv("auto_fallback_on_failure", cfg.general.auto_fallback_on_failure);
     e.kv_path("ffmpeg_path", cfg.general.ffmpeg_path);
 
     e.header("local_files");
@@ -483,6 +487,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
         e.array_header("online_radio.stations");
         e.kv("name", st.name);
         e.kv("url", st.url);
+        if (!st.alternate_urls.empty()) e.kv_strs("alternate_urls", st.alternate_urls);
         if (!st.favicon.empty()) e.kv("favicon", st.favicon);
         if (!st.tags.empty()) e.kv("tags", st.tags);
         if (!st.country.empty()) e.kv("country", st.country);

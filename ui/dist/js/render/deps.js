@@ -39,9 +39,9 @@ export function createDeps(main) {
   main.append(card);
 
   function render() {
-    card.hidden = !tools.some(t => t.downloading || t.error);
+    card.hidden = !tools.some(toolItem => toolItem.downloading || toolItem.error);
     if (card.hidden) return;
-    const sig = tools.map(t => `${t.name}:${t.downloading}:${t.downloaded_bytes}:${t.error}`).join("|");
+    const sig = tools.map(toolItem => `${toolItem.name}:${toolItem.downloading}:${toolItem.downloaded_bytes}:${toolItem.error}`).join("|");
     if (changed("deps", sig)) list.replaceChildren(...tools.map(depRow));
   }
 
@@ -53,7 +53,7 @@ export function createDeps(main) {
     } catch {
       // keep last
     }
-    setTimeout(poll, tools.some(t => t.downloading) ? 1000 : 5000);
+    setTimeout(poll, tools.some(toolItem => toolItem.downloading) ? 1000 : 5000);
   }
 
   return { start: poll };

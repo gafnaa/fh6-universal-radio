@@ -173,6 +173,14 @@ json source_to_json(IAudioSource* s) {
     }
     if (auto* rd = dynamic_cast<sources::OnlineRadioSource*>(s))
         j["details"]["song_history"] = rd->song_history();
+    const auto recovery = s->recovery_status();
+    j["details"]["recovery"] = json{
+        {"retrying", recovery.retrying},
+        {"failed", recovery.failed},
+        {"attempt", recovery.attempt},
+        {"max_attempts", recovery.max_attempts},
+        {"message", recovery.message},
+    };
     return j;
 }
 
@@ -250,6 +258,7 @@ json config_to_json(const Config& c) {
              {"ring_buffer_mb", c.general.ring_buffer_mb},
              {"default_source", c.general.default_source},
              {"fallback_source", c.general.fallback_source},
+             {"auto_fallback_on_failure", c.general.auto_fallback_on_failure},
              {"ffmpeg_path", path_s(c.general.ffmpeg_path)},
          }},
         {"local_files",
@@ -300,6 +309,7 @@ json config_to_json(const Config& c) {
                   for (const auto& st : c.online_radio.stations) {
                       arr.push_back({{"name", st.name},
                                      {"url", st.url},
+                                     {"alternate_urls", st.alternate_urls},
                                      {"favicon", st.favicon},
                                      {"tags", st.tags},
                                      {"country", st.country},
@@ -390,7 +400,9 @@ void apply_patch(Config& c, const json& j) {
         c.general.ring_buffer_mb  = pull(*it, "ring_buffer_mb", c.general.ring_buffer_mb);
         c.general.default_source  = pull(*it, "default_source", c.general.default_source);
         c.general.fallback_source = pull(*it, "fallback_source", c.general.fallback_source);
-        c.general.ffmpeg_path     = pull_path(*it, "ffmpeg_path", c.general.ffmpeg_path);
+        c.general.auto_fallback_on_failure =
+            pull(*it, "auto_fallback_on_failure", c.general.auto_fallback_on_failure);
+        c.general.ffmpeg_path = pull_path(*it, "ffmpeg_path", c.general.ffmpeg_path);
     }
     if (auto it = j.find("local_files"); it != j.end()) {
         c.local_files.enabled        = pull(*it, "enabled", c.local_files.enabled);
@@ -449,6 +461,7 @@ void apply_patch(Config& c, const json& j) {
                 RadioStation rs;
                 rs.name     = item.value("name", "");
                 rs.url      = item.value("url", "");
+                rs.alternate_urls = item.value("alternate_urls", std::vector<std::string>{});
                 rs.favicon  = item.value("favicon", "");
                 rs.tags     = item.value("tags", "");
                 rs.country  = item.value("country", "");
@@ -698,7 +711,7 @@ struct HttpServer::Impl {
 
     json build_state() const {
         auto* a = mgr.active();
-        return json{
+        json state{
             {"game", json{{"attached", true}, {"injector_ready", true}}},
             {"audio",
              json{
@@ -716,6 +729,15 @@ struct HttpServer::Impl {
             {"track", a ? track_to_json(a->current_track()) : json::object()},
             {"errors", json::array()},
         };
+        if (const auto event = mgr.last_fallback_event()) {
+            state["last_fallback"] = json{
+                {"id", event->id},
+                {"source", event->source},
+                {"fallback", event->fallback},
+                {"message", event->message},
+            };
+        }
+        return state;
     }
 
     IAudioSource* find(std::string_view name) const { return mgr.find(name); }
@@ -1112,7 +1134,7 @@ struct HttpServer::Impl {
             if (!yt->add_search_result(body.value("id", std::string{}),
                                        body.value("title", std::string{}),
                                        body.value("artist", std::string{}), error))
-                return fail(400, error);
+                return fail(error == "That song is already in the queue." ? 409 : 400, error);
             mgr.switch_to("youtube_music");
             const auto status = yt->queue_status();
             return ok(json{{"queue_size", status.size}});
@@ -1481,7 +1503,8 @@ struct HttpServer::Impl {
             const bool was_active = (mgr.active() == rd);
             rd->stop();
             rd->set_target(std::move(url), body.value("name", std::string{}),
-                           body.value("logo", std::string{}));
+                           body.value("logo", std::string{}),
+                           body.value("alternate_urls", std::vector<std::string>{}));
             if (was_active) mgr.ring().drain();
             rd->play();
             mgr.switch_to("online_radio");

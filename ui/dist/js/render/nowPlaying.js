@@ -15,9 +15,9 @@ const BACKEND_LITERALS = {
     "Streaming via Spotify Connect": "source.spotify_streaming",
 };
 
-function translateBackendLiteral(value, t) {
+function translateBackendLiteral(value, translate) {
     const key = BACKEND_LITERALS[value];
-    return key ? t(key) : value;
+    return key ? translate(key) : value;
 }
 
 export function renderNowPlaying(refs, state) {

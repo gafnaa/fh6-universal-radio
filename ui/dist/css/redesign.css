@@ -343,7 +343,7 @@ main.dashboard {
     grid-row: 2;
 }
 
-main > .card:not(#source-card):not(#output-card) {
+main > .card:not(#source-card, #output-card) {
     grid-column: 2;
     grid-row: 1 / span 2;
 }
@@ -996,7 +996,9 @@ textarea:disabled {
 }
 
 .eq-bar:nth-child(1) { height: 8px; }
+
 .eq-bar:nth-child(2) { height: 14px; }
+
 .eq-bar:nth-child(3) { height: 6px; }
 
 .or-history,
@@ -1536,10 +1538,6 @@ body.view-minimal .mini-player {
     color: var(--color-ink);
 }
 
-.mini-volume input[type="range"] {
-    width: 96px;
-}
-
 @media (max-width: 900px) {
     :root {
         --gutter: 24px;
@@ -1639,7 +1637,7 @@ body.view-minimal .mini-player {
 
     #source-card,
     #output-card,
-    main > .card:not(#source-card):not(#output-card) {
+    main > .card:not(#source-card, #output-card) {
         grid-column: 1;
         grid-row: auto;
     }
@@ -1755,5 +1753,83 @@ body.view-minimal .mini-player {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
+    }
+}
+
+.playback-history-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+}
+
+.playback-history-head h2 {
+    margin: 0;
+}
+
+.playback-history-list {
+    display: grid;
+    gap: var(--space-2xs);
+    max-height: min(26rem, 55vh);
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+    list-style: none;
+}
+
+.playback-history-item {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-sm);
+    min-width: 0;
+    padding: var(--space-xs);
+    border: 1px solid var(--color-rule);
+    border-radius: var(--radius-input);
+    background: var(--color-paper-2);
+}
+
+.playback-history-item img,
+.playback-history-art {
+    display: grid;
+    width: 44px;
+    aspect-ratio: 1;
+    place-items: center;
+    object-fit: cover;
+    border-radius: 4px;
+    background: var(--color-paper);
+}
+
+.playback-history-track {
+    display: grid;
+    min-width: 0;
+}
+
+.playback-history-track strong,
+.playback-history-track small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.playback-history-track small,
+.playback-history-source {
+    color: var(--color-ink-2);
+    font-size: var(--text-xs);
+}
+
+@media (max-width: 520px) {
+    .playback-history-item {
+        grid-template-columns: 40px minmax(0, 1fr);
+        gap: var(--space-xs);
+    }
+
+    .playback-history-item img,
+    .playback-history-art {
+        width: 40px;
+    }
+
+    .playback-history-source {
+        grid-column: 2;
     }
 }

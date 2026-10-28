@@ -11,12 +11,18 @@ const FALLBACK_MIRRORS = [
 let mirror = null;
 let mirrorPromise = null;
 
+function timedFetch(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 async function resolveMirror() {
   if (mirror) return mirror;
   if (mirrorPromise) return mirrorPromise;
   mirrorPromise = (async () => {
     try {
-      const res = await fetch("https://all.api.radio-browser.info/json/servers", {
+      const res = await timedFetch("https://all.api.radio-browser.info/json/servers", {
         headers: { accept: "application/json" },
       });
       if (!res.ok) throw new Error("servers");
@@ -32,18 +38,27 @@ async function resolveMirror() {
 }
 
 async function call(path, params) {
-  const base = await resolveMirror();
   const qs = params ? "?" + new URLSearchParams(params) : "";
-  let res;
-  try {
-    res = await fetch(`${base}${path}${qs}`, { headers: { accept: "application/json" } });
-  } catch {
-    mirror = null; // a dead mirror shouldn't stick — re-pick on the next call
-    mirrorPromise = null;
-    throw new Error("Radio directory unavailable");
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const base = await resolveMirror();
+    try {
+      const res = await timedFetch(`${base}${path}${qs}`, {
+        headers: { accept: "application/json" },
+      });
+      if (!res.ok) throw new Error("Radio directory error");
+      return await res.json();
+    } catch (error) {
+      lastError = error;
+      mirror = null;
+      mirrorPromise = null;
+    }
   }
-  if (!res.ok) throw new Error("Radio directory error");
-  return res.json();
+  throw new Error(
+    lastError?.name === "AbortError"
+      ? "Radio directory request timed out"
+      : "Radio directory unavailable",
+  );
 }
 
 // Map a directory record onto the station shape the rest of the UI uses

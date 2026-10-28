@@ -61,6 +61,7 @@ const writeJson = (key, value) => {
 const normalize = st => ({
   name: st.name || st.url || "New station",
   url: st.url || "",
+  alternate_urls: Array.isArray(st.alternate_urls) ? st.alternate_urls.filter(Boolean) : [],
   favicon: st.favicon || "",
   tags: st.tags || "",
   country: st.country || "",
@@ -82,6 +83,7 @@ export function createOnlineRadio(main, ctx) {
   let cfgSig = null;
   let filter = "";
   let historySig = "";
+  let selectedTag = "";
 
   // --- cast bar -------------------------------------------------------------
   const urlInput = el("input", {
@@ -130,6 +132,7 @@ export function createOnlineRadio(main, ctx) {
       chip.addEventListener("click", () => {
         switchTab("discover");
         dq.value = t(key);
+        selectedTag = key === "genre.hip_hop" ? "hip-hop" : key.slice("genre.".length).replaceAll("_", " ");
         runSearch();
       });
       return chip;
@@ -173,7 +176,11 @@ export function createOnlineRadio(main, ctx) {
   async function play(st) {
     if (!st?.url) return;
     try {
-      await api.castOnlineRadio(st.url, { name: st.name || "", logo: st.favicon || "" });
+      await api.castOnlineRadio(st.url, {
+        name: st.name || "",
+        logo: st.favicon || "",
+        alternate_urls: st.alternate_urls || [],
+      });
       pushRecent(st);
       if (st.uuid) registerClick(st.uuid);
       toast(t("online_radio.tuning", { name: st.name || "stream" }));
@@ -314,12 +321,18 @@ export function createOnlineRadio(main, ctx) {
     const token = ++searchToken;
     dResults.replaceChildren(el("p", { class: "muted" }, t("online_radio.searching")));
     try {
-      const rows = await searchStations({ name: dq.value.trim(), country: dCountry.value, limit: 40 });
+      const query = dq.value.trim();
+      const rows = await searchStations({
+        name: selectedTag ? "" : query,
+        tag: selectedTag,
+        country: dCountry.value,
+        limit: 40,
+      });
       if (token !== searchToken) return;
       if (!rows.length) {
         return void dResults.replaceChildren(el("p", { class: "muted" }, t("online_radio.no_results")));
       }
-      const terms = dq.value.trim().split(/\s+/).filter(Boolean);
+      const terms = (selectedTag || dq.value.trim()).split(/\s+/).filter(Boolean);
       dResults.replaceChildren(...rows.map(s => resultCard(s, terms)));
     } catch (e) {
       if (token !== searchToken) return;
@@ -373,6 +386,7 @@ export function createOnlineRadio(main, ctx) {
     renderMine();
   });
   filterInput.addEventListener("input", applyFilter);
+  dq.addEventListener("input", () => { selectedTag = ""; });
   dForm.addEventListener("submit", e => {
     e.preventDefault();
     runSearch();
@@ -433,6 +447,10 @@ function createEditor() {
     type: "text", placeholder: t("online_radio.stream_url"),
     dataset: { i18nPlaceholder: "online_radio.stream_url" }, autocomplete: "off",
   });
+  const alternateInput = el("textarea", {
+    rows: 3, placeholder: t("online_radio.alternate_urls"),
+    dataset: { i18nPlaceholder: "online_radio.alternate_urls" },
+  });
   const saveBtn = el("button", { type: "button", class: "btn filled", dataset: { i18n: "btn.save" } }, t("btn.save"));
   const cancelBtn = el("button", { type: "button", class: "btn ghost danger", dataset: { i18n: "btn.cancel" } }, t("btn.cancel") ?? "Cancel");
   const title = el("h3", {}, t("online_radio.save_station"));
@@ -444,6 +462,8 @@ function createEditor() {
       nameInput,
       el("label", { class: "field-label", dataset: { i18n: "online_radio.stream_url" } }, t("online_radio.stream_url")),
       urlInput,
+      el("label", { class: "field-label", dataset: { i18n: "online_radio.alternate_urls" } }, t("online_radio.alternate_urls")),
+      alternateInput,
       el("div", { class: "modal-foot end row" }, [cancelBtn, saveBtn]),
     ]),
   ]);
@@ -457,8 +477,10 @@ function createEditor() {
     const name = nameInput.value.trim();
     const url = urlInput.value.trim();
     if (!url) return toast(t("error.url_required"), true);
+    const alternate_urls = [...new Set(alternateInput.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))]
+      .filter(value => value !== url);
     close();
-    onSave?.({ name: name || url, url });
+    onSave?.({ name: name || url, url, alternate_urls });
     document.body.style.overflow = "";
   };
 
@@ -473,6 +495,7 @@ function createEditor() {
       title.textContent = station.url && station.name ? t("online_radio.edit_station") : t("online_radio.save_station");
       nameInput.value = station.name || "";
       urlInput.value = station.url || "";
+      alternateInput.value = (station.alternate_urls || []).join("\n");
       modal.hidden = false;
       (station.name ? urlInput : nameInput).focus();
       document.body.style.overflow = "hidden";

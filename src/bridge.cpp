@@ -234,6 +234,7 @@ void run_bridge(HMODULE self) noexcept {
     };
 
     sync_sources(with_resolved_bins(cfg, deps));
+    mgr.configure_auto_fallback(cfg.general.fallback_source, cfg.general.auto_fallback_on_failure);
 
     if (!mgr.switch_to(cfg.general.default_source) && !mgr.switch_to(cfg.general.fallback_source)) {
         auto snap = mgr.sources_snapshot();
@@ -306,6 +307,7 @@ void run_bridge(HMODULE self) noexcept {
     auto apply_config = [&bridge, &mgr, &data_dir, &deps, sync_sources,
                          ctrl_ptr = ctrl.get()](const Config& raw) {
         const Config c = with_resolved_bins(raw, deps);
+        mgr.configure_auto_fallback(c.general.fallback_source, c.general.auto_fallback_on_failure);
         sync_sources(c);
         if (!mgr.active()) {
             if (!mgr.switch_to(c.general.default_source) &&

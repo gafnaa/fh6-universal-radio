@@ -26,7 +26,7 @@ describe("toast", () => {
     vi.useFakeTimers();
     toast("Bye");
     expect(document.querySelector(".toast")).toBeTruthy();
-    vi.advanceTimersByTime(2400);
+    vi.advanceTimersByTime(5200);
     expect(document.querySelector(".toast")).toBeNull();
     vi.useRealTimers();
   });

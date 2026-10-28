@@ -36,6 +36,14 @@ struct SourceCapabilities {
     bool queue    = false;
 };
 
+struct RecoveryStatus {
+    bool retrying = false;
+    bool failed = false;
+    uint32_t attempt = 0;
+    uint32_t max_attempts = 0;
+    std::string message;
+};
+
 // One instance per provider; the AudioSourceManager owns them all and at
 // most one is active. Only the active source's PCM reaches the game.
 class IAudioSource {
@@ -91,6 +99,7 @@ public:
     virtual std::optional<ArtworkImage> artwork() const { return std::nullopt; }
 
     virtual PlaybackState playback_state() const noexcept = 0;
+    virtual RecoveryStatus recovery_status() const { return {}; }
     virtual AuthState auth_state() const noexcept         = 0;
     virtual std::string auth_instructions() const { return {}; }
     virtual SourceCapabilities capabilities() const noexcept = 0;

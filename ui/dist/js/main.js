@@ -6,6 +6,7 @@ import { toast } from "./toast.js";
 import { renderStatus } from "./render/status.js";
 import { renderNowPlaying, extractDominantColor } from "./render/nowPlaying.js";
 import { renderSources } from "./render/sources.js";
+import { createPlaybackHistory } from "./render/playbackHistory.js";
 import { createOutput } from "./render/output.js";
 import {
     renderSettings, collectSettings, applyInterfacePrefs,
@@ -26,6 +27,7 @@ import { confirmAction } from "./render/confirmModal.js";
 
 let state = null;
 let cfg = null;
+let lastFallbackEventKey = "";
 
 const refs = {
     status: $("#status"),
@@ -72,6 +74,7 @@ if (refs.np.mini && refs.np.mini.next) refs.np.mini.next.innerHTML = icons.next;
 const mainEl = $("main");
 
 let renderOutput;
+let playbackHistory;
 let deps;
 let externalAudio;
 let localFiles;
@@ -162,6 +165,21 @@ function render() {
     if (!state) return;
     renderStatus(refs.status, state);
     renderNowPlaying(refs.np, state);
+    playbackHistory?.update(state);
+    const fallback = state.last_fallback;
+    if (fallback) {
+        const eventKey = `${fallback.id}:${fallback.source}:${fallback.fallback}:${fallback.message}`;
+        if (eventKey !== lastFallbackEventKey) {
+            lastFallbackEventKey = eventKey;
+            const sourceKey = `source.${fallback.source}`;
+            const fallbackKey = `source.${fallback.fallback}`;
+            toast(t("source.fallback_notice", {
+                source: t(sourceKey) === sourceKey ? fallback.source : t(sourceKey),
+                fallback: t(fallbackKey) === fallbackKey ? fallback.fallback : t(fallbackKey),
+                message: fallback.message,
+            }), true);
+        }
+    }
     renderSources(refs.sources, state, cfg, switchSource);
     renderOutput(state);
     externalAudio.render();
@@ -403,6 +421,7 @@ async function boot() {
         }
     }, $("#mini-vol-tooltip"));
 
+    playbackHistory = createPlaybackHistory(mainEl);
     deps = createDeps(mainEl);
 
     externalAudio = createExternalAudio(mainEl, {

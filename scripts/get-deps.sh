@@ -23,7 +23,7 @@ fetch https://raw.githubusercontent.com/ToruNiina/toml11/main/single_include/tom
 fetch https://raw.githubusercontent.com/mackron/miniaudio/master/miniaudio.h                    miniaudio/miniaudio.h
 fetch https://raw.githubusercontent.com/nothings/stb/master/stb_image.h                    stb/stb_image.h
 fetch https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h              stb/stb_image_write.h
-fetch https://raw.githubusercontent.com/nothings/stb/master/stb_image_resize2.h            stb/stb_image_resize2.h
+fetch https://raw.githubusercontent.com/nothings/stb/db69a229ae5d89caff1d96b1af0c2a0fe0041c2b/deprecated/stb_image_resize2.h stb/stb_image_resize2.h
 fetch https://raw.githubusercontent.com/Rebzzel/kiero/master/kiero.h                       kiero/kiero.h
 fetch https://raw.githubusercontent.com/Rebzzel/kiero/master/kiero.cpp                     kiero/kiero.cpp
 fetch https://raw.githubusercontent.com/TsudaKageyu/minhook/master/include/MinHook.h       minhook/include/MinHook.h

@@ -1083,6 +1083,40 @@ struct HttpServer::Impl {
                            {"endpoint_id", snap.external_audio.endpoint_id},
                            {"media_session_id", snap.external_audio.media_session_id}});
         }
+        if (m == "POST" && p == "/api/source/youtube_music/search") {
+            auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
+            if (!yt) return fail(404, "youtube_music not registered");
+            const auto body = json::parse(req.body);
+            const auto query = body.value("query", std::string{});
+            if (query.find_first_not_of(" \t\r\n") == std::string::npos || query.size() > 200)
+                return fail(400, "Search text must contain 1 to 200 characters.");
+
+            std::string error;
+            const auto results = yt->search_songs(query, error);
+            if (!error.empty()) return fail(502, error);
+            json items = json::array();
+            for (const auto& result : results) {
+                items.push_back(json{{"id", result.id},
+                                     {"title", result.title},
+                                     {"artist", result.artist},
+                                     {"thumbnail_url", result.thumbnail_url},
+                                     {"duration_ms", result.duration_ms}});
+            }
+            return ok(json{{"results", std::move(items)}});
+        }
+        if (m == "POST" && p == "/api/source/youtube_music/queue/add") {
+            auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
+            if (!yt) return fail(404, "youtube_music not registered");
+            const auto body = json::parse(req.body);
+            std::string error;
+            if (!yt->add_search_result(body.value("id", std::string{}),
+                                       body.value("title", std::string{}),
+                                       body.value("artist", std::string{}), error))
+                return fail(400, error);
+            mgr.switch_to("youtube_music");
+            const auto status = yt->queue_status();
+            return ok(json{{"queue_size", status.size}});
+        }
         if (m == "POST" && p == "/api/source/youtube_music/cast") {
             auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
             if (!yt) return fail(404, "youtube_music not registered");

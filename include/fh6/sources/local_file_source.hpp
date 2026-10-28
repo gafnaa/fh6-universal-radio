@@ -196,7 +196,7 @@ private:
 
     mutable std::mutex artwork_mu_;
     std::condition_variable artwork_cv_;
-    std::unordered_map<std::string, ArtworkCacheEntry> artwork_cache_;
+    mutable std::unordered_map<std::string, ArtworkCacheEntry> artwork_cache_;
     std::unordered_set<std::string> artwork_pending_;
     std::deque<ArtworkRequest> artwork_queue_;
     std::thread artwork_thread_;

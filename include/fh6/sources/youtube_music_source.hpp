@@ -73,9 +73,19 @@ public:
         bool scanning = false;
         std::string error;
     };
+    struct SearchResult {
+        std::string id;
+        std::string title;
+        std::string artist;
+        std::string thumbnail_url;
+        std::uint64_t duration_ms = 0;
+    };
 
     QueueSnapshot queue_snapshot() const;
     QueueStatus queue_status() const;
+    std::vector<SearchResult> search_songs(std::string query, std::string& error) const;
+    bool add_search_result(std::string id, std::string title, std::string artist,
+                           std::string& error);
     bool jump_to(std::size_t index);
 
     // Edit the upcoming part of the queue (indices after the cursor). The

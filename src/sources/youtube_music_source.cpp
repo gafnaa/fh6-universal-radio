@@ -5,8 +5,11 @@
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <random>
 #include <string>
@@ -291,6 +294,49 @@ bool YouTubeMusicSource::remove_queue_entry(std::size_t index) {
     return true;
 }
 
+static std::string capture_yt_dlp(const std::wstring& cmd, const std::wstring& yt,
+                            bool custom_path, worker::WorkerClient* worker, std::string& error) {
+    if (worker && worker->alive()) {
+        auto raw = worker->run_capture(cmd);
+        if (!raw.empty()) return raw;
+    }
+
+    HANDLE job = create_kill_on_close_job();
+    if (!job) {
+        error = "Could not start yt-dlp (CreateJobObject failed).";
+        return {};
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) {
+        CloseHandle(job);
+        error = "Could not start yt-dlp (CreatePipe failed).";
+        return {};
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul_in = open_nul(GENERIC_READ);
+    HANDLE err_log = open_stderr_log();
+    HANDLE proc = spawn_in_job(job, cmd, nul_in, wr, err_log);
+    const DWORD ec = proc ? 0u : GetLastError();
+    CloseHandle(wr);
+    if (nul_in) CloseHandle(nul_in);
+    if (err_log) CloseHandle(err_log);
+    if (!proc) {
+        CloseHandle(rd);
+        CloseHandle(job);
+        log::warn("[yt] failed to launch yt-dlp -- {}",
+                  describe_launch_failure(yt, ec, custom_path));
+        error = "Could not launch yt-dlp. Check the yt-dlp path in Settings.";
+        return {};
+    }
+
+    auto raw = drain_to_eof(rd);
+    CloseHandle(rd);
+    CloseHandle(proc);
+    CloseHandle(job);
+    return raw;
+}
+
 static ResolveResult fetch_flat_playlist(const YouTubeMusicConfig& cfg, const std::string& url,
                                          worker::WorkerClient* worker) {
     ResolveResult result;
@@ -370,6 +416,132 @@ static ResolveResult fetch_flat_playlist(const YouTubeMusicConfig& cfg, const st
         log::info("[yt] resolved {} track(s) from {}", result.tracks.size(), url);
     }
     return result;
+}
+
+std::vector<YouTubeMusicSource::SearchResult>
+YouTubeMusicSource::search_songs(std::string query, std::string& error) const {
+    error.clear();
+    const auto first = query.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        error = "Enter a song, artist, or album to search for.";
+        return {};
+    }
+    query.erase(0, first);
+    const auto last = query.find_last_not_of(" \t\r\n");
+    query.erase(last + 1);
+    if (query.size() > 200 || std::any_of(query.begin(), query.end(), [](unsigned char c) {
+            return c < 0x20 || c == 0x7f;
+        })) {
+        error = "Search text must be 200 characters or fewer and cannot contain control characters.";
+        return {};
+    }
+
+    YouTubeMusicConfig cfg;
+    worker::WorkerClient* worker = nullptr;
+    {
+        std::scoped_lock lk{mu_};
+        cfg = cfg_;
+        worker = worker_;
+    }
+
+    const auto yt = cfg.yt_dlp_path.empty() ? L"yt-dlp" : cfg.yt_dlp_path.wstring();
+    const std::wstring search_url = L"ytsearch10:" + widen(query);
+    std::wstring cmd = quote(yt) +
+        L" --ignore-config --no-warnings --no-progress --flat-playlist --skip-download"
+        L" --dump-single-json --encoding UTF-8 ";
+    if (!cfg.cookies_path.empty()) cmd += L"--cookies " + quote(cfg.cookies_path.wstring()) + L" ";
+    cmd += L"-- " + quote(search_url);
+
+    auto raw = capture_yt_dlp(cmd, yt, !cfg.yt_dlp_path.empty(), worker, error);
+    if (raw.empty()) {
+        if (error.empty()) error = "Song search failed. Check your network connection and yt-dlp setup.";
+        return {};
+    }
+
+    std::vector<SearchResult> results;
+    try {
+        const auto root = nlohmann::json::parse(raw);
+        auto entries = root.find("entries");
+        if (entries == root.end() || !entries->is_array()) {
+            error = "yt-dlp returned an invalid search response.";
+            return {};
+        }
+        results.reserve(std::min<std::size_t>(entries->size(), 10));
+        for (const auto& entry : *entries) {
+            if (!entry.is_object()) continue;
+            auto string_field = [&](const char* key) {
+                const auto it = entry.find(key);
+                return it != entry.end() && it->is_string() ? it->get<std::string>() : std::string{};
+            };
+            auto id = string_field("id");
+            if (id.empty()) continue;
+
+            SearchResult result;
+            result.id = std::move(id);
+            result.title = string_field("title");
+            if (result.title.empty()) result.title = "Untitled video";
+            result.artist = string_field("channel");
+            if (result.artist.empty()) result.artist = string_field("uploader");
+            result.thumbnail_url = string_field("thumbnail");
+            if (result.thumbnail_url.empty())
+                result.thumbnail_url = "https://i.ytimg.com/vi/" + result.id + "/mqdefault.jpg";
+            if (const auto duration = entry.find("duration");
+                duration != entry.end() && duration->is_number()) {
+                const double seconds = duration->get<double>();
+                if (std::isfinite(seconds) && seconds > 0.0)
+                    result.duration_ms = static_cast<std::uint64_t>(seconds * 1000.0);
+            }
+            results.push_back(std::move(result));
+            if (results.size() == 10) break;
+        }
+    } catch (const std::exception& e) {
+        log::warn("[yt] could not parse song search results: {}", e.what());
+        error = "Could not read song search results from yt-dlp.";
+        return {};
+    }
+
+    if (results.empty()) error = "No songs found. Try a different search.";
+    return results;
+}
+
+bool YouTubeMusicSource::add_search_result(std::string id, std::string title, std::string artist,
+                                           std::string& error) {
+    error.clear();
+    if (id.empty() || id.size() > 64 ||
+        !std::all_of(id.begin(), id.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '-' || c == '_';
+        })) {
+        error = "Invalid YouTube video ID.";
+        return false;
+    }
+    if (title.size() > 512 || artist.size() > 512) {
+        error = "Song metadata is too long.";
+        return false;
+    }
+
+    std::scoped_lock lk{mu_};
+    if (queue_scanning_) {
+        error = "The current playlist is still loading. Try adding the song again in a moment.";
+        return false;
+    }
+
+    const bool was_empty = queue_.empty();
+    const auto url = watch_url_for_id(id);
+    if (was_empty) {
+        // A first search result creates a temporary one-song queue. Subsequent
+        // results append to it, and normal transport/queue controls apply.
+        target_url_ = url;
+        queue_built_for_ = url;
+        queue_idx_ = 0;
+        queue_error_.clear();
+    }
+    queue_.push_back({url, title.empty() ? "Untitled video" : std::move(title),
+                      std::move(artist), queue_.size()});
+    discard_prefetch_locked();
+
+    if (was_empty) start_pipe_locked();
+    return true;
 }
 
 void YouTubeMusicSource::invalidate_queue_locked() {

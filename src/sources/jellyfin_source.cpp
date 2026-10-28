@@ -265,8 +265,8 @@ std::unique_ptr<JellyfinSource::Pipe> JellyfinSource::spawn_pipe_locked(std::siz
 
 std::string JellyfinSource::queue_key_locked() const {
     if (!target_playlist_.empty()) {
-        if (target_playlist_ == "FAVORITES") return "\x01cast:favorites";
-        return "\x01cast:" + target_playlist_;
+        if (target_playlist_ == "FAVORITES") return "\x01" "cast:favorites";
+        return "\x01" "cast:" + target_playlist_;
     }
     const JellyfinStation* st = active_station_locked();
     if (!st) return {};

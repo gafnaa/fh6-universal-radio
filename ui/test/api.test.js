@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { api } from "../dist/js/api.js";
+import { api } from "../dist/js/data/api.js";
 
 function ok(body = {}) {
   return vi.fn().mockResolvedValue({ ok: true, json: async () => body });
@@ -46,19 +46,19 @@ describe("api endpoints", () => {
   });
 
   it("casts and shuffle carry the right body", async () => {
-    await api.castYoutube("https://yt");
+    await api.youtubeMusic.cast("https://yt");
     expect(lastCall()).toMatchObject({
       path: "/api/source/youtube_music/cast",
       body: { url: "https://yt" },
     });
 
-    await api.shuffleYoutube(true);
+    await api.youtubeMusic.shuffle(true);
     expect(lastCall()).toMatchObject({
       path: "/api/source/youtube_music/shuffle",
       body: { shuffle: true },
     });
 
-    await api.castJellyfin("pl-1");
+    await api.jellyfin.cast("pl-1");
     expect(lastCall()).toMatchObject({
       path: "/api/source/jellyfin/cast",
       body: { playlist_id: "pl-1" },
@@ -96,28 +96,28 @@ describe("api endpoints", () => {
       body: { path: "C:\\Music" },
     });
 
-    await api.getLocalStations();
+    await api.localFiles.getStations();
     expect(lastCall()).toMatchObject({ path: "/api/source/local_files/stations", method: "GET" });
 
     const stations = [{ name: "Rock", roots: ["D:\\Rock"], excluded: [] }];
-    await api.putLocalStations(stations, "Rock");
+    await api.localFiles.putStations(stations, "Rock");
     expect(lastCall()).toMatchObject({
       path: "/api/source/local_files/stations",
       method: "PUT",
       body: { stations, active_station: "Rock" },
     });
 
-    await api.activateLocalStation("Rock");
+    await api.localFiles.activateStation("Rock");
     expect(lastCall()).toMatchObject({
       path: "/api/source/local_files/activate",
       method: "POST",
       body: { name: "Rock" },
     });
 
-    await api.getLocalQueue();
+    await api.localFiles.getQueue();
     expect(lastCall()).toMatchObject({ path: "/api/source/local_files/queue", method: "GET" });
 
-    await api.playLocalIndex(7);
+    await api.localFiles.playIndex(7);
     expect(lastCall()).toMatchObject({
       path: "/api/source/local_files/play",
       method: "POST",
@@ -134,7 +134,7 @@ describe("api endpoints", () => {
       statusText: "Bad Gateway",
       json: async () => ({ error: "jellyfin fetch failed" }),
     });
-    await expect(api.castJellyfin("x")).rejects.toThrow("jellyfin fetch failed");
+    await expect(api.jellyfin.cast("x")).rejects.toThrow("jellyfin fetch failed");
   });
 
   it("falls back to statusText when no error body", async () => {

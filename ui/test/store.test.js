@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { changed, resetMemo } from "../dist/js/store.js";
+import { changed, resetMemo } from "../dist/js/lib/store.js";
 
 beforeEach(resetMemo);
 

@@ -130,7 +130,7 @@ function buildKeybindField({ id, label, type, cur, dataset, args: [optionsArg] }
         customInput.addEventListener("focus", () => {
             padInterval = setInterval(() => {
                 const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-                for (let gp of gamepads) {
+                for (const gp of gamepads) {
                     if (!gp) continue;
                     let currentMask = 0;
                     for (let i = 0; i < gp.buttons.length; i++) {

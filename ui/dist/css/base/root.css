@@ -82,10 +82,10 @@ body.theme-dark {
 body.theme-light {
     color-scheme: light;
     --color-pitch-black: #f4f4f6;
-    --color-void-black: #ffffff;
+    --color-void-black: #fff;
     --color-ghost-white: #17171a;
-    --color-pure-white: #000000;
-    --color-graphite: #ffffff;
+    --color-pure-white: #000;
+    --color-graphite: #fff;
     --color-ash-gray: #4b5563;
     --color-muted-steel: #6b7280;
 

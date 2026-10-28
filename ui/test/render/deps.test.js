@@ -12,7 +12,7 @@ describe("depRow", () => {
     });
     expect(row.querySelector(".dep-name").textContent).toBe("ffmpeg");
     expect(row.querySelector(".dep-state").textContent).toBe("downloading 50%");
-    expect(row.querySelector(".dep-fill").style.width).toBe("50%");
+    expect(row.querySelector(".dep-fill").style.transform).toBe("scaleX(0.5)");
   });
 
   it("renders bytes when total is unknown", () => {

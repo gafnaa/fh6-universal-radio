@@ -58,6 +58,7 @@ export const SCHEMA = () => [
             ["ring_buffer_mb", t("schema.general.ring_buffer"), "number", 1, 64],
             ["default_source", t("schema.general.default_source"), "source-select"],
             ["fallback_source", t("schema.general.fallback_source"), "source-select"],
+            ["auto_fallback_on_failure", t("schema.general.auto_fallback_on_failure"), "checkbox"],
             ["ffmpeg_path", t("schema.general.ffmpeg_path"), "text"],
         ],
     ],

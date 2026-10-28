@@ -1,5 +1,4 @@
 @media (max-width: 1050px) {
-
     .view-minimal .mini-volume input[type="range"] {
         display: none;
         position: absolute;

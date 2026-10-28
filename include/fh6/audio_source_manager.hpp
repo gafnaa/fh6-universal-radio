@@ -6,6 +6,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,6 +18,13 @@ namespace fh6 {
 // callback consumes from ring(); pump_once() is the producer side.
 class AudioSourceManager {
 public:
+    struct FallbackEvent {
+        uint64_t id = 0;
+        std::string source;
+        std::string fallback;
+        std::string message;
+    };
+
     explicit AudioSourceManager(std::size_t ring_bytes);
 
     void register_source(std::unique_ptr<IAudioSource> src);
@@ -34,6 +42,8 @@ public:
     IAudioSource* find(std::string_view name) const;
     std::vector<IAudioSource*> sources_snapshot() const;
     void pump_once();
+    void configure_auto_fallback(std::string source, bool enabled);
+    std::optional<FallbackEvent> last_fallback_event() const;
 
     void shutdown() noexcept;
 
@@ -42,6 +52,10 @@ private:
     RingBuffer ring_;
     std::unordered_map<std::string, std::unique_ptr<IAudioSource>> sources_;
     std::atomic<IAudioSource*> active_{nullptr};
+    bool auto_fallback_on_failure_ = false;
+    std::string fallback_source_;
+    std::optional<FallbackEvent> last_fallback_event_;
+    uint64_t fallback_event_sequence_ = 0;
 };
 
 } // namespace fh6

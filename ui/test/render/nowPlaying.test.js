@@ -41,12 +41,12 @@ describe("renderNowPlaying", () => {
       },
     });
     expect(refs.title.textContent).toBe("Song");
-    expect(refs.artist.textContent).toBe("Artist · Album");
+    expect(refs.artist.textContent).toBe("Artist, Album");
     expect(refs.pos.textContent).toBe("1:40");
     expect(refs.dur.textContent).toBe("3:20");
-    expect(refs.fill.style.width).toBe("50%");
+    expect(refs.fill.style.transform).toBe("scaleX(0.5)");
     expect(refs.art.classList.contains("has-art")).toBe(true);
-    expect(refs.img.getAttribute("src")).toBe("http://art/cover.jpg");
+    expect(refs.img.getAttribute("src")).toBe("https://wsrv.nl/?url=http%3A%2F%2Fart%2Fcover.jpg");
     expect(refs.backdrop.style.backgroundImage).toBe('url("http://art/cover.jpg")');
     expect(refs.play.dataset.icon).toBe("pause");
     expect(refs.play.getAttribute("aria-label")).toBe("Pause");
@@ -68,7 +68,7 @@ describe("renderNowPlaying", () => {
     renderNowPlaying(refs, { sources: { available: [] }, track: {} });
     expect(refs.title.textContent).toBe("Nothing playing");
     expect(refs.artist.textContent).toBe("");
-    expect(refs.fill.style.width).toBe("0%");
+    expect(refs.fill.style.transform).toBe("scaleX(0)");
     expect(refs.art.classList.contains("has-art")).toBe(false);
     expect(refs.backdrop.style.backgroundImage).toBe("");
     expect(refs.play.dataset.icon).toBe("play");

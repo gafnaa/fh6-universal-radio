@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { api } from "../dist/js/api.js";
+import { api } from "../dist/js/data/api.js";
 
 function ok(body = {}) {
   return vi.fn().mockResolvedValue({ ok: true, json: async () => body });

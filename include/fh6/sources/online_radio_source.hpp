@@ -6,6 +6,7 @@
 #include "fh6/worker/worker_client.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <memory>
@@ -41,6 +42,7 @@ public:
     PlaybackState playback_state() const noexcept override {
         return state_.load(std::memory_order_acquire);
     }
+    RecoveryStatus recovery_status() const override;
     AuthState auth_state() const noexcept override { return AuthState::none_required; }
 
     // capabilities: no seeking, but can go next/prev through the station list
@@ -48,7 +50,8 @@ public:
 
     void set_config(const OnlineRadioConfig& c);
     void set_ffmpeg_path(std::filesystem::path p);
-    void set_target(std::string url, std::string name = {}, std::string logo = {});
+    void set_target(std::string url, std::string name = {}, std::string logo = {},
+                    std::vector<std::string> alternate_urls = {});
 
     // single source of truth for what may be handed to ffmpeg -i (guards every
     // playback path against file:/concat:/etc. injection from config or the API).
@@ -62,6 +65,9 @@ private:
     struct Pipe;
     void start_pipe_locked();
     void stop_pipe_locked();
+    void reset_recovery_locked();
+    void schedule_retry_locked(std::string message);
+    std::vector<std::string> stream_urls_locked() const;
 
     OnlineRadioConfig cfg_;
     std::filesystem::path ffmpeg_path_;
@@ -72,6 +78,14 @@ private:
     std::string target_url_;
     std::string target_name_;
     std::string target_logo_;
+    std::vector<std::string> target_alternate_urls_;
+    std::size_t active_url_index_ = 0;
+    uint32_t recovery_attempt_ = 0;
+    uint32_t max_recovery_attempts_ = 5;
+    bool retry_pending_ = false;
+    std::chrono::steady_clock::time_point retry_at_{};
+    std::chrono::steady_clock::time_point healthy_since_{};
+    RecoveryStatus recovery_;
 
     // dynamic metadata state
     std::string current_title_;

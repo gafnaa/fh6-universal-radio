@@ -33,10 +33,9 @@
 }
 
 @keyframes cover-pulse {
-
     0%,
     100% {
-        box-shadow: 0 0 0 0px color-mix(in srgb, var(--accent) 40%, transparent);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
     }
 
     50% {
@@ -45,7 +44,6 @@
 }
 
 @keyframes eq-bounce {
-
     0%,
     100% {
         transform: scaleY(0.4);

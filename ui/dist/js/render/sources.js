@@ -52,6 +52,15 @@ function stateText(s) {
 
   const detail = detailLine(s);
   if (detail) parts.push(detail);
+  const recovery = s.details?.recovery;
+  if (recovery?.retrying) {
+    parts.push(t("source.reconnecting", {
+      attempt: String(recovery.attempt),
+      max: String(recovery.max_attempts),
+    }));
+  } else if (recovery?.failed && recovery.message) {
+    parts.push(t("source.recovery_failed", { message: recovery.message }));
+  }
   return parts.join(", ");
 }
 
@@ -63,7 +72,7 @@ export function visibleSources(state, cfg) {
 
 export function sourcesSignature(list, active) {
   return list
-    .map(s => `${s.name}:${s.playback_state}:${s.auth_state}:${s.details?.track_count ?? ""}:${s.name === active}`)
+    .map(s => `${s.name}:${s.playback_state}:${s.auth_state}:${s.details?.track_count ?? ""}:${s.details?.recovery?.attempt ?? ""}:${s.details?.recovery?.message ?? ""}:${s.name === active}`)
     .join("|");
 }
 
@@ -81,8 +90,9 @@ export function renderSources(node, state, cfg, onSwitch) {
 
   node.replaceChildren(
     ...list.map(s => {
-      const stateCls =
-        s.auth_state === "needs_auth" ? "warn" : s.auth_state === "error" ? "err" : "";
+      const stateCls = s.details?.recovery?.failed || s.auth_state === "error"
+        ? "err"
+        : s.details?.recovery?.retrying || s.auth_state === "needs_auth" ? "warn" : "";
       const showNote =
         (s.auth_state === "needs_auth" || s.auth_state === "error") && s.auth_instructions;
       const children = [

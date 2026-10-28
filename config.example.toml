@@ -10,6 +10,7 @@ port              = 8420
 ring_buffer_mb    = 4
 default_source    = "online_radio"    # local_files | online_radio | youtube_music | jellyfin | external_audio | spotify
 fallback_source   = "local_files"
+auto_fallback_on_failure = false  # switch to fallback_source after reconnect attempts fail
 ffmpeg_path       = ''                # blank = auto-download to fh6-radio/bin (else `ffmpeg` on PATH); shared by all sources
 
 [local_files]
@@ -75,6 +76,7 @@ default_station_index = 0 # index of radio station in list (0 refers to start of
 #[[online_radio.stations]]
 #name     = "" # display name
 #url      = "" # stream url
+#alternate_urls = [] # alternate HTTP(S) stream URLs, tried after the primary fails
 #favicon  = "" # logo url, shown as now-playing artwork
 #tags     = "" # comma-separated genres
 #country  = "" # ISO 3166-1 alpha-2 code or name

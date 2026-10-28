@@ -4,7 +4,7 @@ const EXIT_MS = 200;
 let stack = null;
 
 function ensureStack() {
-    if (stack) return stack;
+    if (stack?.isConnected) return stack;
     stack = document.createElement("div");
     stack.className = "toast-stack";
     document.body.appendChild(stack);

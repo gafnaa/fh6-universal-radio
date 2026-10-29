@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createOnlineRadio } from "../../dist/js/render/onlineRadio.js";
+import { clearSearchCache } from "../../dist/js/data/radioBrowser.js";
 
 const json = body => ({ ok: true, json: async () => body });
 
 beforeEach(() => {
   document.body.innerHTML = "<main></main>";
   localStorage.clear();
+  clearSearchCache();
   global.fetch = vi.fn(() => Promise.resolve(json({})));
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 const ctx = (active, stations = []) => ({
   getState: () => ({
@@ -48,5 +53,29 @@ describe("createOnlineRadio", () => {
     or.render();
     const tabs = [...document.querySelectorAll(".or-tab")].map(t => t.dataset.i18n);
     expect(tabs).toEqual(["online_radio.my_stations", "online_radio.discover"]);
+  });
+
+  it("debounces automatic searches while the query is being typed", async () => {
+    vi.useFakeTimers();
+    const or = createOnlineRadio(document.querySelector("main"), ctx("online_radio", []));
+    or.render();
+    document.querySelectorAll(".or-tab")[1].click();
+    const input = document.querySelector(".or-discover-form input");
+
+    input.value = "ja";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(100);
+    input.value = "jazz";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(349);
+    expect(
+      global.fetch.mock.calls.filter(([url]) => String(url).includes("/json/stations/search")),
+    ).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const searchCalls = global.fetch.mock.calls.filter(([url]) =>
+      String(url).includes("/json/stations/search"),
+    );
+    expect(searchCalls).toHaveLength(1);
   });
 });

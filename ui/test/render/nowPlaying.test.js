@@ -46,8 +46,12 @@ describe("renderNowPlaying", () => {
     expect(refs.dur.textContent).toBe("3:20");
     expect(refs.fill.style.transform).toBe("scaleX(0.5)");
     expect(refs.art.classList.contains("has-art")).toBe(true);
-    expect(refs.img.getAttribute("src")).toBe("https://wsrv.nl/?url=http%3A%2F%2Fart%2Fcover.jpg");
-    expect(refs.backdrop.style.backgroundImage).toBe('url("http://art/cover.jpg")');
+    expect(refs.img.getAttribute("src")).toBe(
+      "https://wsrv.nl/?url=http%3A%2F%2Fart%2Fcover.jpg&w=512&h=512&fit=cover",
+    );
+    expect(refs.backdrop.style.backgroundImage).toBe(
+      'url("https://wsrv.nl/?url=http%3A%2F%2Fart%2Fcover.jpg&w=512&h=512&fit=cover")',
+    );
     expect(refs.play.dataset.icon).toBe("pause");
     expect(refs.play.getAttribute("aria-label")).toBe("Pause");
   });

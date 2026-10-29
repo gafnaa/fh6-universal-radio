@@ -33,7 +33,7 @@ export function renderNowPlaying(refs, state) {
     if (hasArt) {
         const isExternal = track.artwork_url.startsWith("http") && !isLocalUrl(track.artwork_url);
         src = isExternal
-            ? `https://wsrv.nl/?url=${encodeURIComponent(track.artwork_url)}`
+            ? `https://wsrv.nl/?url=${encodeURIComponent(track.artwork_url)}&w=512&h=512&fit=cover`
             : track.artwork_url;
 
         if (refs.img.getAttribute("src") !== src) {
@@ -58,7 +58,7 @@ export function renderNowPlaying(refs, state) {
         }
     }
 
-    if (refs.backdrop) refs.backdrop.style.backgroundImage = hasArt ? `url("${track.artwork_url}")` : "";
+    if (refs.backdrop) refs.backdrop.style.backgroundImage = hasArt ? `url("${src}")` : "";
 
     const title = translateBackendLiteral(translateLoadingPlaceholder(track.title, t), t);
     const artist = translateBackendLiteral(translateLoadingPlaceholder(track.artist, t), t);

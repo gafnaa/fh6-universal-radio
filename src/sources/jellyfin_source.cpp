@@ -169,7 +169,8 @@ struct JellyfinSource::Pipe {
     std::uint64_t bytes_written = 0;
     std::atomic<std::uint64_t> position_ms{0};
     std::chrono::steady_clock::time_point last_data_at = std::chrono::steady_clock::now();
-    bool ended                = false;
+    bool stalled = false;
+    bool ended = false;
     std::size_t for_queue_idx = 0;
 
     ~Pipe() {
@@ -681,11 +682,12 @@ void JellyfinSource::pump(RingBuffer& ring) {
         const std::uint64_t played = p->bytes_written > r ? p->bytes_written - r : 0;
         p->position_ms.store(played * 1000ull / kPcmBytesPerSec, std::memory_order_release);
     };
-    auto on_eof = [&] {
+    auto on_eof = [&](bool stalled = false) {
         if (p->read_pipe) {
             CloseHandle(p->read_pipe);
             p->read_pipe = nullptr;
         }
+        p->stalled = p->stalled || stalled;
         p->ended = true;
         if (p->bytes_written == 0)
             handle_stream_failure_locked("The Jellyfin stream produced no audio.");
@@ -697,7 +699,7 @@ void JellyfinSource::pump(RingBuffer& ring) {
             const std::uint64_t duration_ms = p->for_queue_idx < queue_.size()
                                                   ? queue_[p->for_queue_idx].duration_ms
                                                   : 0;
-            if (stream_ended_early(p->bytes_written, duration_ms)) {
+            if (p->stalled || stream_ended_early(p->bytes_written, duration_ms)) {
                 handle_stream_failure_locked("The Jellyfin stream ended before the track finished.");
             } else {
                 retry_pending_ = false;
@@ -741,7 +743,7 @@ void JellyfinSource::pump(RingBuffer& ring) {
         avail             = avail > got ? avail - got : 0;
     }
     if (avail == 0 && std::chrono::steady_clock::now() - p->last_data_at >= kStreamStallTimeout) {
-        on_eof();
+        on_eof(true);
         return;
     }
     update_position();

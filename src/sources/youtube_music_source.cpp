@@ -106,7 +106,8 @@ struct YouTubeMusicSource::Pipe {
     std::string title_buf;
     std::uint64_t bytes_written = 0;
     std::chrono::steady_clock::time_point last_data_at = std::chrono::steady_clock::now();
-    bool ended                  = false;
+    bool stalled = false;
+    bool ended = false;
 
     // Identity + metadata travel with the pipeline so prefetch promotion
     // carries the (already-resolved) title without a "(loading)" flash.
@@ -1141,7 +1142,7 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
     if (p->ended) {
         update_position();
         if (ring.readable() == 0) {
-            if (stream_ended_early(p->bytes_written, p->info.duration_ms))
+            if (p->stalled || stream_ended_early(p->bytes_written, p->info.duration_ms))
                 handle_stream_failure_locked("The YouTube Music stream ended before the track finished.");
             else
                 advance_to_next();
@@ -1151,7 +1152,8 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
 
     if (!p->read_pipe) return;
 
-    auto on_eof = [&] {
+    auto on_eof = [&](bool stalled = false) {
+        p->stalled = p->stalled || stalled;
         p->ended = true;
         if (p->read_pipe) {
             CloseHandle(p->read_pipe);
@@ -1197,7 +1199,7 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
             state_.store(PlaybackState::playing, std::memory_order_release);
     }
     if (avail == 0 && std::chrono::steady_clock::now() - p->last_data_at >= kStreamStallTimeout) {
-        on_eof();
+        on_eof(true);
         return;
     }
     // Even when the read loop didn't run (e.g. ring was full), keep position

@@ -421,7 +421,7 @@ async function boot() {
         }
     }, $("#mini-vol-tooltip"));
 
-    playbackHistory = createPlaybackHistory(mainEl);
+    playbackHistory = createPlaybackHistory(mainEl, api);
     deps = createDeps(mainEl);
 
     externalAudio = createExternalAudio(mainEl, {

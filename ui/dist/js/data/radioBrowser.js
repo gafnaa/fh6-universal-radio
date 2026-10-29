@@ -7,6 +7,10 @@ const FALLBACK_MIRRORS = [
   "https://nl1.api.radio-browser.info",
   "https://at1.api.radio-browser.info",
 ];
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_CACHE_LIMIT = 64;
+const searchCache = new Map();
+const inFlightSearches = new Map();
 
 let mirror = null;
 let mirrorPromise = null;
@@ -77,17 +81,55 @@ export function normalizeStation(s) {
 }
 
 export async function searchStations({ name = "", tag = "", country = "", limit = 40 } = {}) {
+  const clean = value => String(value || "").trim().replace(/\s+/g, " ");
+  const query = {
+    name: clean(name),
+    tag: clean(tag),
+    country: clean(country).toUpperCase(),
+    limit: Math.max(1, Math.min(100, Number(limit) || 40)),
+  };
+  const key = JSON.stringify({
+    name: query.name.toLowerCase(),
+    tag: query.tag.toLowerCase(),
+    country: query.country,
+    limit: query.limit,
+  });
+  const cached = searchCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    searchCache.delete(key);
+    searchCache.set(key, cached);
+    return cached.rows.map(station => ({ ...station }));
+  }
+  if (cached) searchCache.delete(key);
+  if (inFlightSearches.has(key)) return (await inFlightSearches.get(key)).map(station => ({ ...station }));
+
   const params = {
-    limit: String(limit),
+    limit: String(query.limit),
     order: "clickcount",
     reverse: "true",
     hidebroken: "true",
   };
-  if (name) params.name = name;
-  if (tag) params.tagList = tag;
-  if (country) params.countrycode = country;
-  const rows = await call("/json/stations/search", params);
-  return (Array.isArray(rows) ? rows : []).map(normalizeStation).filter(s => s.url);
+  if (query.name) params.name = query.name;
+  if (query.tag) params.tagList = query.tag;
+  if (query.country) params.countrycode = query.country;
+
+  const request = call("/json/stations/search", params)
+    .then(rows => (Array.isArray(rows) ? rows : []).map(normalizeStation).filter(s => s.url))
+    .then(rows => {
+      searchCache.set(key, { rows, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+      while (searchCache.size > SEARCH_CACHE_LIMIT) searchCache.delete(searchCache.keys().next().value);
+      return rows;
+    });
+  inFlightSearches.set(key, request);
+  try {
+    return (await request).map(station => ({ ...station }));
+  } finally {
+    if (inFlightSearches.get(key) === request) inFlightSearches.delete(key);
+  }
+}
+
+export function clearSearchCache() {
+  searchCache.clear();
 }
 
 // Fire-and-forget: bumps the community click counter and resolves the playable URL.

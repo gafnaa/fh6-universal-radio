@@ -842,7 +842,6 @@ struct HttpServer::Impl {
 
     bool clear_playback_history() {
         std::scoped_lock lk{history_mu_};
-        if (playback_history_.empty()) return true;
         playback_history_ = json::array();
         history_version_.fetch_add(1, std::memory_order_acq_rel);
         return save_playback_history_locked();

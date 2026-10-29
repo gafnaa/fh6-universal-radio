@@ -43,6 +43,8 @@ jobs:
           persist-credentials: false
       - name: Build distribution into dist/
         run: .\scripts\build.ps1
+      - name: Run native recovery integration tests
+        run: ctest --test-dir build -C Release --output-on-failure
       - name: Upload distribution
         uses: actions/upload-artifact@v7
         with:

@@ -133,6 +133,8 @@ export function createOnlineRadio(main, ctx) {
         switchTab("discover");
         dq.value = t(key);
         selectedTag = key === "genre.hip_hop" ? "hip-hop" : key.slice("genre.".length).replaceAll("_", " ");
+        clearTimeout(scheduledSearch);
+        scheduledSearch = null;
         runSearch();
       });
       return chip;
@@ -317,6 +319,17 @@ export function createOnlineRadio(main, ctx) {
   }
 
   let searchToken = 0;
+  let scheduledSearch = null;
+  function scheduleSearch() {
+    clearTimeout(scheduledSearch);
+    scheduledSearch = null;
+    if (!selectedTag && dq.value.trim().length < 2) return;
+    scheduledSearch = setTimeout(() => {
+      scheduledSearch = null;
+      runSearch();
+    }, 350);
+  }
+
   async function runSearch() {
     const token = ++searchToken;
     dResults.replaceChildren(el("p", { class: "muted" }, t("online_radio.searching")));
@@ -386,9 +399,15 @@ export function createOnlineRadio(main, ctx) {
     renderMine();
   });
   filterInput.addEventListener("input", applyFilter);
-  dq.addEventListener("input", () => { selectedTag = ""; });
+  dq.addEventListener("input", () => {
+    selectedTag = "";
+    scheduleSearch();
+  });
+  dCountry.addEventListener("change", scheduleSearch);
   dForm.addEventListener("submit", e => {
     e.preventDefault();
+    clearTimeout(scheduledSearch);
+    scheduledSearch = null;
     runSearch();
   });
 

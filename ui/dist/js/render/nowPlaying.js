@@ -50,8 +50,8 @@ export function renderNowPlaying(refs, state) {
             };
         }
     } else {
-        if (refs.img.getAttribute("src") !== "assets/default_artwork_2048.png") {
-            refs.img.src = "assets/default_artwork_2048.png";
+        if (refs.img.getAttribute("src") !== "assets/default_artwork_512.png") {
+            refs.img.src = "assets/default_artwork_512.png";
         }
         if (!track.title) {
             document.body.style.setProperty("--accent", "var(--color-sunset-yellow)");
@@ -85,7 +85,7 @@ export function renderNowPlaying(refs, state) {
             if (refs.mini.art.getAttribute("src") !== src) {
                 refs.mini.art.src = src;
             }
-        } else {
+        } else if (refs.mini.art.getAttribute("src") !== "assets/default_artwork_128.png") {
             refs.mini.art.src = "assets/default_artwork_128.png";
         }
 

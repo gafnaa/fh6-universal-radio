@@ -24,7 +24,8 @@ namespace fh6::sources {
 class YouTubeMusicSource final : public IAudioSource {
 public:
     YouTubeMusicSource(YouTubeMusicConfig cfg, std::filesystem::path ffmpeg_path,
-                        worker::WorkerClient* worker = nullptr);
+                        worker::WorkerClient* worker = nullptr,
+                        std::filesystem::path queue_state_file = {});
     ~YouTubeMusicSource() override;
 
     std::string_view name() const noexcept override { return "youtube_music"; }
@@ -118,6 +119,8 @@ private:
     void discard_prefetch_locked() noexcept;
     bool ensure_queue_locked(); // true when the queue is ready; false while scanning
     void handle_stream_failure_locked(std::string message);
+    void load_queue_state_locked();
+    void persist_queue_state_locked() const;
     std::size_t next_queue_idx_locked() const noexcept;
     bool promote_prefetch_locked(std::size_t expected_idx);
     void maybe_spawn_prefetch_locked(); // called from pump() once current is healthy
@@ -127,6 +130,7 @@ private:
 
     YouTubeMusicConfig cfg_;
     std::filesystem::path ffmpeg_path_;
+    std::filesystem::path queue_state_file_;
     worker::WorkerClient* worker_;
     std::unique_ptr<Pipe> pipe_;
     std::unique_ptr<Pipe> prefetch_; // pre-spawned next-track pipeline (or null)

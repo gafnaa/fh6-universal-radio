@@ -97,6 +97,7 @@ Requires **Visual Studio 2022+** with the *Desktop development with C++* workloa
 ```powershell
 .\scripts\get-deps.ps1                                                  # one-time: header-only deps
 .\scripts\build.ps1                                                     # compile + stage dist\
+ctest --test-dir build -C Release --output-on-failure                    # native recovery tests
 .\scripts\install.ps1 -GameDir "C:\XboxGames\Forza Horizon 6\Content"   # copy into game
 ```
 

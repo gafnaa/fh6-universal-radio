@@ -126,3 +126,15 @@ set_target_properties(fh6-radio-worker PROPERTIES
     OUTPUT_NAME fh6-radio-worker
     PREFIX ""
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(fh6-stream-recovery-tests
+        tests/stream_recovery_integration.cpp
+        src/audio_source_manager.cpp
+        src/ring_buffer.cpp
+        src/log.cpp
+    )
+    target_include_directories(fh6-stream-recovery-tests PRIVATE include)
+    add_test(NAME stream-recovery-integration COMMAND fh6-stream-recovery-tests)
+endif()

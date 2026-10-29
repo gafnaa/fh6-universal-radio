@@ -27,6 +27,7 @@
 #include <deque>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -631,7 +632,7 @@ void send_response(SOCKET client, int code, std::string_view body,
          << "Content-Type: " << content_type << "\r\n"
          << "Content-Length: " << body.size() << "\r\n"
          << "Access-Control-Allow-Origin: *\r\n"
-         << "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n"
+         << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
          << "Access-Control-Allow-Headers: Content-Type\r\n"
          << "Connection: close\r\n\r\n";
     auto headers = resp.str();
@@ -648,6 +649,68 @@ bool serve_file(SOCKET client, const std::filesystem::path& file) {
     return true;
 }
 
+constexpr std::size_t kPlaybackHistoryLimit = 30;
+
+std::optional<json> normalize_history_entry(const json& value) {
+    if (!value.is_object()) return std::nullopt;
+    constexpr std::array<std::string_view, 7> fields{
+        "key", "source", "source_name", "title", "artist", "album", "played_at"};
+    for (const auto field : fields) {
+        const auto it = value.find(field);
+        if (it == value.end() || !it->is_string()) return std::nullopt;
+    }
+    const auto artwork_it = value.find("artwork_url");
+    if (artwork_it == value.end() || !artwork_it->is_string()) return std::nullopt;
+
+    const auto key = value.at("key").get<std::string>();
+    const auto source = value.at("source").get<std::string>();
+    const auto source_name = value.at("source_name").get<std::string>();
+    const auto title = value.at("title").get<std::string>();
+    const auto artist = value.at("artist").get<std::string>();
+    const auto album = value.at("album").get<std::string>();
+    const auto played_at = value.at("played_at").get<std::string>();
+    const auto artwork_url = artwork_it->get<std::string>();
+    if (key.empty() || source.empty() || source_name.empty() || title.empty() || played_at.empty() ||
+        key.size() > 2048 || source.size() > 64 || source_name.size() > 128 || title.size() > 512 ||
+        artist.size() > 512 || album.size() > 512 || played_at.size() > 64 ||
+        artwork_url.size() > 2048)
+        return std::nullopt;
+    if (!artwork_url.empty() && !artwork_url.starts_with("https://") &&
+        !artwork_url.starts_with("http://"))
+        return std::nullopt;
+
+    return json{{"key", key}, {"source", source}, {"source_name", source_name}, {"title", title},
+                {"artist", artist}, {"album", album}, {"artwork_url", artwork_url},
+                {"played_at", played_at}};
+}
+
+bool merge_history_entry(json& entries, const json& entry) {
+    std::vector<json> merged;
+    merged.reserve(entries.size() + 1);
+    const auto& key = entry.at("key");
+    bool replaced = false;
+    for (const auto& current : entries) {
+        if (current.value("key", std::string{}) != key.get<std::string>()) {
+            merged.push_back(current);
+            continue;
+        }
+        replaced = true;
+        merged.push_back(current.value("played_at", std::string{}) >
+                                 entry.value("played_at", std::string{})
+                             ? current
+                             : entry);
+    }
+    if (!replaced) merged.push_back(entry);
+    std::stable_sort(merged.begin(), merged.end(), [](const json& a, const json& b) {
+        return a.value("played_at", std::string{}) > b.value("played_at", std::string{});
+    });
+    if (merged.size() > kPlaybackHistoryLimit) merged.resize(kPlaybackHistoryLimit);
+    json next = merged;
+    if (next == entries) return false;
+    entries = std::move(next);
+    return true;
+}
+
 } // namespace
 
 struct HttpServer::Impl {
@@ -656,7 +719,11 @@ struct HttpServer::Impl {
     ConfigStore& store;
     DependencyManager& deps;
     std::filesystem::path ui_dist;
+    std::filesystem::path history_file_;
     youtube_oauth::Client youtube_oauth;
+    mutable std::mutex history_mu_;
+    json playback_history_ = json::array();
+    std::atomic<std::uint64_t> history_version_{0};
     std::atomic<bool> stopping{false};
     std::atomic<uint16_t> bound_port{0};
     std::mutex socket_mu_;
@@ -678,7 +745,9 @@ struct HttpServer::Impl {
     Impl(AudioSourceManager& m, fmod_bridge::DSPBridge& b, ConfigStore& s, DependencyManager& d,
          uint16_t port, std::filesystem::path dist, std::filesystem::path data_dir)
         : mgr{m}, bridge{b}, store{s}, deps{d}, ui_dist{std::move(dist)},
+          history_file_{data_dir / "playback-history.json"},
           youtube_oauth{std::move(data_dir) / "youtube-oauth-token.dpapi"} {
+        load_playback_history();
         thr = std::thread{[this, port] { run(port); }};
     }
     ~Impl() {
@@ -697,6 +766,86 @@ struct HttpServer::Impl {
         for (auto& w : workers_)
             if (w.joinable()) w.join();
         if (wsa_ready.load(std::memory_order_acquire)) WSACleanup();
+    }
+
+    void load_playback_history() {
+        std::ifstream in{history_file_, std::ios::binary};
+        if (!in) return;
+        try {
+            const auto saved = json::parse(in);
+            const auto it = saved.find("entries");
+            if (it == saved.end() || !it->is_array()) return;
+            for (auto entry = it->rbegin(); entry != it->rend(); ++entry) {
+                if (const auto normalized = normalize_history_entry(*entry))
+                    merge_history_entry(playback_history_, *normalized);
+            }
+            if (!playback_history_.empty()) history_version_.store(1, std::memory_order_release);
+        } catch (const std::exception& e) {
+            log::warn("[history] ignored invalid playback history file: {}", e.what());
+            playback_history_ = json::array();
+        }
+    }
+
+    bool save_playback_history_locked() {
+        std::error_code ec;
+        std::filesystem::create_directories(history_file_.parent_path(), ec);
+        if (ec) {
+            log::warn("[history] could not create data directory: {}", ec.message());
+            return false;
+        }
+
+        auto temp = history_file_;
+        temp += ".tmp";
+        const auto contents = json{{"version", 1}, {"entries", playback_history_}}.dump(2);
+        {
+            std::ofstream out{temp, std::ios::binary | std::ios::trunc};
+            if (!out) {
+                log::warn("[history] could not open {} for writing", temp.string());
+                return false;
+            }
+            out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+            if (!out) {
+                log::warn("[history] could not write {}", temp.string());
+                return false;
+            }
+        }
+        if (!MoveFileExW(temp.c_str(), history_file_.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            log::warn("[history] could not replace history file (Windows error {})", GetLastError());
+            return false;
+        }
+        return true;
+    }
+
+    json playback_history_snapshot() const {
+        std::scoped_lock lk{history_mu_};
+        return json{{"entries", playback_history_},
+                    {"version", history_version_.load(std::memory_order_acquire)}};
+    }
+
+    bool add_playback_history_entry(const json& entry) {
+        std::scoped_lock lk{history_mu_};
+        if (!merge_history_entry(playback_history_, entry)) return true;
+        history_version_.fetch_add(1, std::memory_order_acq_rel);
+        return save_playback_history_locked();
+    }
+
+    bool import_playback_history(const std::vector<json>& entries) {
+        std::scoped_lock lk{history_mu_};
+        bool changed = false;
+        for (auto entry = entries.rbegin(); entry != entries.rend(); ++entry)
+            changed = merge_history_entry(playback_history_, *entry) || changed;
+        if (!changed) return true;
+        history_version_.fetch_add(1, std::memory_order_acq_rel);
+        return save_playback_history_locked();
+    }
+
+    bool clear_playback_history() {
+        std::scoped_lock lk{history_mu_};
+        if (playback_history_.empty()) return true;
+        playback_history_ = json::array();
+        history_version_.fetch_add(1, std::memory_order_acq_rel);
+        return save_playback_history_locked();
     }
 
     json build_sources() const {
@@ -727,6 +876,7 @@ struct HttpServer::Impl {
              }},
             {"sources", build_sources()},
             {"track", a ? track_to_json(a->current_track()) : json::object()},
+            {"playback_history_version", history_version_.load(std::memory_order_acquire)},
             {"errors", json::array()},
         };
         if (const auto event = mgr.last_fallback_event()) {
@@ -915,6 +1065,37 @@ struct HttpServer::Impl {
 
         if (m == "GET" && p == "/api/state") return ok(build_state());
         if (m == "GET" && p == "/api/events") return send_event_snapshot(client);
+        if (m == "GET" && p == "/api/history") return ok(playback_history_snapshot());
+        if (m == "POST" && p == "/api/history") {
+            const auto body = json::parse(req.body);
+            const auto it = body.find("entry");
+            if (it == body.end()) return fail(400, "missing playback history entry");
+            const auto entry = normalize_history_entry(*it);
+            if (!entry) return fail(400, "invalid playback history entry");
+            if (!add_playback_history_entry(*entry))
+                return fail(500, "could not persist playback history");
+            return ok(playback_history_snapshot());
+        }
+        if (m == "POST" && p == "/api/history/import") {
+            const auto body = json::parse(req.body);
+            const auto it = body.find("entries");
+            if (it == body.end() || !it->is_array() || it->size() > kPlaybackHistoryLimit)
+                return fail(400, "invalid playback history import");
+            std::vector<json> entries;
+            entries.reserve(it->size());
+            for (const auto& value : *it) {
+                const auto entry = normalize_history_entry(value);
+                if (!entry) return fail(400, "invalid playback history entry");
+                entries.push_back(*entry);
+            }
+            if (!import_playback_history(entries))
+                return fail(500, "could not persist playback history");
+            return ok(playback_history_snapshot());
+        }
+        if (m == "DELETE" && p == "/api/history") {
+            if (!clear_playback_history()) return fail(500, "could not clear playback history");
+            return ok(playback_history_snapshot());
+        }
         if (m == "GET" && p == "/api/sources") return ok(build_sources());
         if (m == "GET" && p.starts_with("/api/artwork")) {
             // ?v=<token> only busts the browser cache; the active source

@@ -31,6 +31,21 @@ using subprocess::widen;
 
 // PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
+constexpr int kMaxTrackRetries = 2;
+constexpr int kMaxConsecutiveFailedTracks = 3;
+constexpr auto kStreamStallTimeout = std::chrono::seconds{30};
+
+std::uint64_t pcm_duration_ms(std::uint64_t bytes) {
+    return bytes / kPcmBytesPerSec * 1000ull +
+           (bytes % kPcmBytesPerSec) * 1000ull / kPcmBytesPerSec;
+}
+
+bool stream_ended_early(std::uint64_t bytes, std::uint64_t expected_ms) {
+    if (expected_ms < 30'000) return false;
+    const auto streamed_ms = pcm_duration_ms(bytes);
+    const auto tolerance_ms = std::max<std::uint64_t>(5'000, expected_ms / 20);
+    return streamed_ms + tolerance_ms < expected_ms;
+}
 
 bool is_playlist_url(std::string_view url) {
     return url.find("playlist?") != std::string_view::npos ||
@@ -90,6 +105,7 @@ struct YouTubeMusicSource::Pipe {
     HANDLE title_pipe = nullptr;
     std::string title_buf;
     std::uint64_t bytes_written = 0;
+    std::chrono::steady_clock::time_point last_data_at = std::chrono::steady_clock::now();
     bool ended                  = false;
 
     // Identity + metadata travel with the pipeline so prefetch promotion
@@ -203,6 +219,9 @@ void YouTubeMusicSource::shutdown() noexcept {
 void YouTubeMusicSource::set_target(std::string url) {
     std::scoped_lock lk{mu_};
     target_url_ = std::move(url);
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     // Invalidate queue so the next play() re-resolves against the new URL.
     invalidate_queue_locked();
     discard_prefetch_locked();
@@ -266,7 +285,9 @@ YouTubeMusicSource::QueueStatus YouTubeMusicSource::queue_status() const {
 bool YouTubeMusicSource::jump_to(std::size_t index) {
     std::scoped_lock lk{mu_};
     if (index >= queue_.size()) return false;
-    consecutive_failed_ = 0;
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     queue_idx_ = index;
     if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
     sync_play_state_locked();
@@ -808,8 +829,58 @@ void YouTubeMusicSource::start_pipe_locked() {
     if (queue_idx_ >= queue_.size()) queue_idx_ = 0;
 
     pipe_ = spawn_pipe_locked(queue_[queue_idx_].url, queue_idx_);
-    if (!pipe_) return;
+    if (!pipe_) {
+        if (!queue_scanning_) {
+            retry_pending_ = false;
+            recovery_ = {false, true, 1, 1, "Could not start the YouTube Music stream."};
+            state_.store(PlaybackState::stopped, std::memory_order_release);
+        }
+        return;
+    }
     position_ms_.store(0, std::memory_order_release);
+    state_.store(PlaybackState::buffering, std::memory_order_release);
+}
+
+void YouTubeMusicSource::handle_stream_failure_locked(std::string message) {
+    if (track_retry_attempt_ < kMaxTrackRetries) {
+        ++track_retry_attempt_;
+        const auto delay = std::chrono::seconds{1u << (track_retry_attempt_ - 1)};
+        retry_at_ = std::chrono::steady_clock::now() + delay;
+        retry_pending_ = true;
+        recovery_ = {true, false, static_cast<std::uint32_t>(track_retry_attempt_),
+                     static_cast<std::uint32_t>(kMaxTrackRetries), std::move(message)};
+        position_ms_.store(0, std::memory_order_release);
+        state_.store(PlaybackState::buffering, std::memory_order_release);
+        log::warn("[yt] retry {}/{} in {}s: {}", track_retry_attempt_, kMaxTrackRetries,
+                  delay.count(), recovery_.message);
+        return;
+    }
+
+    track_retry_attempt_ = 0;
+    if (++consecutive_failed_ >= kMaxConsecutiveFailedTracks) {
+        retry_pending_ = false;
+        recovery_ = {false, true, static_cast<std::uint32_t>(consecutive_failed_),
+                     static_cast<std::uint32_t>(kMaxConsecutiveFailedTracks),
+                     "YouTube Music could not play " + std::to_string(consecutive_failed_) +
+                         " consecutive tracks. " + message};
+        stop_pipe_locked();
+        log::error("[yt] stream recovery exhausted: {}", recovery_.message);
+        return;
+    }
+
+    recovery_ = {true, false, static_cast<std::uint32_t>(consecutive_failed_),
+                 static_cast<std::uint32_t>(kMaxConsecutiveFailedTracks),
+                 std::move(message) + " Skipping to the next track."};
+    queue_idx_ = next_queue_idx_locked();
+    if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
+    if (!pipe_ && !queue_scanning_) {
+        retry_pending_ = false;
+        recovery_.retrying = false;
+        recovery_.failed = true;
+        recovery_.message = "Could not start the next YouTube Music track after stream failure.";
+        state_.store(PlaybackState::stopped, std::memory_order_release);
+        return;
+    }
     state_.store(PlaybackState::buffering, std::memory_order_release);
 }
 
@@ -829,6 +900,7 @@ bool YouTubeMusicSource::promote_prefetch_locked(std::size_t expected_idx) {
         return false;
     }
     pipe_ = std::move(prefetch_);
+    pipe_->last_data_at = std::chrono::steady_clock::now();
     // Ring still drains leftover PCM from the previous track; the new pipe's
     // OS pipe buffer (~1 MB) already holds ~5 s of decoded audio, so PCM
     // continuity is preserved and the "(loading)" label never appears.
@@ -861,6 +933,9 @@ void YouTubeMusicSource::stop_pipe_locked() {
 
 void YouTubeMusicSource::play() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     if (!pipe_) start_pipe_locked();
     sync_play_state_locked();
 }
@@ -870,7 +945,9 @@ void YouTubeMusicSource::pause() { state_.store(PlaybackState::paused, std::memo
 bool YouTubeMusicSource::restart_current() {
     std::scoped_lock lk{mu_};
     if (queue_.empty()) return false;
-    consecutive_failed_ = 0;
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     start_pipe_locked(); // re-pipe from t=0 at the same queue_idx_; prefetch is still valid
     if (!pipe_) return false;
     state_.store(PlaybackState::playing, std::memory_order_release);
@@ -880,7 +957,9 @@ bool YouTubeMusicSource::restart_current() {
 bool YouTubeMusicSource::skip_next() {
     std::scoped_lock lk{mu_};
     if (queue_.empty()) return false;
-    consecutive_failed_ = 0;
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     queue_idx_          = next_queue_idx_locked();
     if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
     if (!pipe_) return false;
@@ -890,6 +969,8 @@ bool YouTubeMusicSource::skip_next() {
 
 void YouTubeMusicSource::stop() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    if (recovery_.retrying) recovery_.retrying = false;
     ++queue_request_gen_;
     queue_scanning_ = false;
     resolver_.cancel_pending();
@@ -901,7 +982,9 @@ void YouTubeMusicSource::stop() {
 void YouTubeMusicSource::next() {
     std::scoped_lock lk{mu_};
     if (queue_.empty()) return;
-    consecutive_failed_ = 0; // user override clears the give-up state
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {}; // user override clears the give-up state
     queue_idx_          = next_queue_idx_locked();
     if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
     sync_play_state_locked();
@@ -910,7 +993,9 @@ void YouTubeMusicSource::next() {
 void YouTubeMusicSource::previous() {
     std::scoped_lock lk{mu_};
     if (queue_.empty()) return;
-    consecutive_failed_ = 0;
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     const auto n        = static_cast<std::ptrdiff_t>(queue_.size());
     auto i              = static_cast<std::ptrdiff_t>(queue_idx_) - 1;
     queue_idx_          = static_cast<std::size_t>(((i % n) + n) % n);
@@ -926,6 +1011,11 @@ TrackInfo YouTubeMusicSource::current_track() const {
     if (pipe_) t = pipe_->info;
     t.position_ms = position_ms_.load(std::memory_order_acquire);
     return t;
+}
+
+RecoveryStatus YouTubeMusicSource::recovery_status() const {
+    std::scoped_lock lk{mu_};
+    return recovery_;
 }
 
 void YouTubeMusicSource::set_playback_options(const PlaybackConfig& opts) {
@@ -1012,6 +1102,14 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
     }
 
     std::scoped_lock lk{mu_};
+    if (retry_pending_) {
+        if (std::chrono::steady_clock::now() < retry_at_) return;
+        retry_pending_ = false;
+        start_pipe_locked();
+        if (!pipe_ && !queue_scanning_)
+            handle_stream_failure_locked("Could not restart the current YouTube Music track.");
+        return;
+    }
     Pipe* p = pipe_.get();
     if (!p) return;
 
@@ -1026,6 +1124,9 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
             stop_pipe_locked();
             return;
         }
+        retry_pending_ = false;
+        track_retry_attempt_ = consecutive_failed_ = 0;
+        recovery_ = {};
         queue_idx_ = next_queue_idx_locked();
         if (!promote_prefetch_locked(queue_idx_)) start_pipe_locked();
         if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
@@ -1039,29 +1140,25 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
 
     if (p->ended) {
         update_position();
-        if (ring.readable() == 0) advance_to_next();
+        if (ring.readable() == 0) {
+            if (stream_ended_early(p->bytes_written, p->info.duration_ms))
+                handle_stream_failure_locked("The YouTube Music stream ended before the track finished.");
+            else
+                advance_to_next();
+        }
         return;
     }
 
     if (!p->read_pipe) return;
 
     auto on_eof = [&] {
-        if (p->bytes_written == 0) {
-            if (++consecutive_failed_ >= 3) {
-                log::warn("[yt] giving up after {} consecutive empty tracks", consecutive_failed_);
-                stop_pipe_locked();
-                return;
-            }
-            advance_to_next();
-            return;
-        }
-
-        consecutive_failed_ = 0;
-        p->ended            = true;
+        p->ended = true;
         if (p->read_pipe) {
             CloseHandle(p->read_pipe);
             p->read_pipe = nullptr;
         }
+        if (p->bytes_written == 0)
+            handle_stream_failure_locked("The YouTube Music stream produced no audio.");
     };
 
     DWORD avail = 0;
@@ -1085,14 +1182,23 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
             return;
         }
         const DWORD aligned = (got / 4u) * 4u;
+        if (aligned && p->bytes_written == 0 && recovery_.retrying) {
+            recovery_.retrying = false;
+            recovery_.message = "Playback resumed after a stream interruption.";
+        }
         if (aligned) eq_.process(reinterpret_cast<int16_t*>(buf), aligned / 4u);
         ring.write(buf, aligned);
         p->bytes_written += aligned;
+        p->last_data_at = std::chrono::steady_clock::now();
         update_position();
         avail = avail > got ? avail - got : 0;
         if (state_.load(std::memory_order_acquire) == PlaybackState::buffering &&
             ring.readable() > 32 * 1024)
             state_.store(PlaybackState::playing, std::memory_order_release);
+    }
+    if (avail == 0 && std::chrono::steady_clock::now() - p->last_data_at >= kStreamStallTimeout) {
+        on_eof();
+        return;
     }
     // Even when the read loop didn't run (e.g. ring was full), keep position
     // moving as the mixer drains the ring.

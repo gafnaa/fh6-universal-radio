@@ -7,6 +7,7 @@
 #include "fh6/playback_dsp.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -97,6 +98,7 @@ public:
     PlaybackState playback_state() const noexcept override {
         return state_.load(std::memory_order_acquire);
     }
+    RecoveryStatus recovery_status() const override;
     AuthState auth_state() const noexcept override { return auth_; }
     std::string auth_instructions() const override;
     SourceCapabilities capabilities() const noexcept override { return {false, true, true}; }
@@ -115,6 +117,7 @@ private:
     void stop_pipe_locked();  // drop pipe_ only
     void discard_prefetch_locked() noexcept;
     bool ensure_queue_locked(); // true when the queue is ready; false while scanning
+    void handle_stream_failure_locked(std::string message);
     std::size_t next_queue_idx_locked() const noexcept;
     bool promote_prefetch_locked(std::size_t expected_idx);
     void maybe_spawn_prefetch_locked(); // called from pump() once current is healthy
@@ -146,7 +149,11 @@ private:
     bool queue_scanning_             = false;
     std::string queue_error_;
     std::atomic<uint64_t> position_ms_{0};
-    int consecutive_failed_ = 0; // tracks-in-a-row that produced 0 PCM bytes
+    int consecutive_failed_ = 0;
+    int track_retry_attempt_ = 0;
+    bool retry_pending_ = false;
+    std::chrono::steady_clock::time_point retry_at_{};
+    RecoveryStatus recovery_{};
     AuthState auth_         = AuthState::none_required;
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 

@@ -106,9 +106,24 @@ describe("renderSources", () => {
                 recovery: {
                   retrying: false,
                   failed: true,
-                  attempt: 5,
-                  max_attempts: 5,
-                  message: "connection closed",
+                  attempt: 3,
+                  max_attempts: 3,
+                  message: "track retries exhausted",
+                },
+              },
+            },
+            {
+              name: "jellyfin",
+              display_name: "Jellyfin",
+              playback_state: "buffering",
+              auth_state: "authenticated",
+              details: {
+                recovery: {
+                  retrying: true,
+                  failed: false,
+                  attempt: 1,
+                  max_attempts: 2,
+                  message: "connection interrupted",
                 },
               },
             },
@@ -119,9 +134,11 @@ describe("renderSources", () => {
       () => {},
     );
 
-    expect(node().querySelector(".source-state.warn").textContent).toContain("Reconnecting (2/5)");
+    const warnings = node().querySelectorAll(".source-state.warn");
+    expect(warnings[0].textContent).toContain("Reconnecting (2/5)");
+    expect(warnings[1].textContent).toContain("Reconnecting (1/2)");
     expect(node().querySelector(".source-state.err").textContent).toContain(
-      "Stream failed: connection closed",
+      "Stream failed: track retries exhausted",
     );
   });
 

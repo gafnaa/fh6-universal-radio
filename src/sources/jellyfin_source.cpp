@@ -31,6 +31,21 @@ using subprocess::widen;
 
 // PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
+constexpr int kMaxTrackRetries = 2;
+constexpr int kMaxConsecutiveFailedTracks = 3;
+constexpr auto kStreamStallTimeout = std::chrono::seconds{30};
+
+std::uint64_t pcm_duration_ms(std::uint64_t bytes) {
+    return bytes / kPcmBytesPerSec * 1000ull +
+           (bytes % kPcmBytesPerSec) * 1000ull / kPcmBytesPerSec;
+}
+
+bool stream_ended_early(std::uint64_t bytes, std::uint64_t expected_ms) {
+    if (expected_ms < 30'000) return false;
+    const auto streamed_ms = pcm_duration_ms(bytes);
+    const auto tolerance_ms = std::max<std::uint64_t>(5'000, expected_ms / 20);
+    return streamed_ms + tolerance_ms < expected_ms;
+}
 
 bool config_complete(const JellyfinConfig& c) noexcept {
     return !c.server_url.empty() && !c.api_key.empty() && !c.user_id.empty() &&
@@ -153,6 +168,7 @@ struct JellyfinSource::Pipe {
     HANDLE read_pipe = nullptr;
     std::uint64_t bytes_written = 0;
     std::atomic<std::uint64_t> position_ms{0};
+    std::chrono::steady_clock::time_point last_data_at = std::chrono::steady_clock::now();
     bool ended                = false;
     std::size_t for_queue_idx = 0;
 
@@ -397,7 +413,13 @@ void JellyfinSource::start_pipe_locked() {
     if (queue_.empty()) return;
     if (current_idx_ >= queue_.size()) current_idx_ = 0;
     pipe_ = spawn_pipe_locked(current_idx_);
-    if (pipe_) state_.store(PlaybackState::buffering, std::memory_order_release);
+    if (pipe_) {
+        state_.store(PlaybackState::buffering, std::memory_order_release);
+    } else if (!queue_scanning_) {
+        retry_pending_ = false;
+        recovery_ = {false, true, 1, 1, "Could not start the Jellyfin stream."};
+        state_.store(PlaybackState::stopped, std::memory_order_release);
+    }
 }
 
 void JellyfinSource::stop_pipe_locked() {
@@ -406,6 +428,47 @@ void JellyfinSource::stop_pipe_locked() {
     // explicitly.
     pipe_.reset();
     state_.store(PlaybackState::stopped, std::memory_order_release);
+}
+
+void JellyfinSource::handle_stream_failure_locked(std::string message) {
+    if (track_retry_attempt_ < kMaxTrackRetries) {
+        ++track_retry_attempt_;
+        const auto delay = std::chrono::seconds{1u << (track_retry_attempt_ - 1)};
+        retry_at_ = std::chrono::steady_clock::now() + delay;
+        retry_pending_ = true;
+        recovery_ = {true, false, static_cast<std::uint32_t>(track_retry_attempt_),
+                     static_cast<std::uint32_t>(kMaxTrackRetries), std::move(message)};
+        state_.store(PlaybackState::buffering, std::memory_order_release);
+        log::warn("[jellyfin] retry {}/{} in {}s: {}", track_retry_attempt_, kMaxTrackRetries,
+                  delay.count(), recovery_.message);
+        return;
+    }
+
+    track_retry_attempt_ = 0;
+    if (++consecutive_failed_ >= kMaxConsecutiveFailedTracks) {
+        retry_pending_ = false;
+        recovery_ = {false, true, static_cast<std::uint32_t>(consecutive_failed_),
+                     static_cast<std::uint32_t>(kMaxConsecutiveFailedTracks),
+                     "Jellyfin could not play " + std::to_string(consecutive_failed_) +
+                         " consecutive tracks. " + message};
+        stop_pipe_locked();
+        log::error("[jellyfin] stream recovery exhausted: {}", recovery_.message);
+        return;
+    }
+
+    recovery_ = {true, false, static_cast<std::uint32_t>(consecutive_failed_),
+                 static_cast<std::uint32_t>(kMaxConsecutiveFailedTracks),
+                 std::move(message) + " Skipping to the next track."};
+    retry_pending_ = false;
+    advance_locked(+1);
+    if (!pipe_ && !queue_scanning_) {
+        recovery_.retrying = false;
+        recovery_.failed = true;
+        recovery_.message = "Could not start the next Jellyfin track after stream failure.";
+        state_.store(PlaybackState::stopped, std::memory_order_release);
+    } else {
+        state_.store(PlaybackState::buffering, std::memory_order_release);
+    }
 }
 
 void JellyfinSource::discard_prefetch_locked() noexcept { prefetch_.reset(); }
@@ -421,6 +484,7 @@ bool JellyfinSource::promote_prefetch_locked(std::size_t expected_idx) {
         return false;
     }
     pipe_ = std::move(prefetch_);
+    pipe_->last_data_at = std::chrono::steady_clock::now();
     return true;
 }
 
@@ -450,6 +514,9 @@ void JellyfinSource::advance_locked(std::ptrdiff_t step) {
 
 void JellyfinSource::play() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     if (!pipe_) start_pipe_locked();
     sync_play_state_locked();
 }
@@ -458,6 +525,8 @@ void JellyfinSource::pause() { state_.store(PlaybackState::paused, std::memory_o
 
 void JellyfinSource::stop() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    if (recovery_.retrying) recovery_.retrying = false;
     ++queue_request_gen_;
     queue_scanning_ = false;
     resolver_.cancel_pending();
@@ -468,10 +537,16 @@ void JellyfinSource::stop() {
 
 void JellyfinSource::next() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     advance_locked(+1);
 }
 void JellyfinSource::previous() {
     std::scoped_lock lk{mu_};
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     advance_locked(-1);
 }
 
@@ -482,6 +557,9 @@ bool JellyfinSource::cast(std::string playlist_id, bool use_favorites) {
         return false;
 
     target_playlist_ = use_favorites ? "FAVORITES" : std::move(playlist_id);
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     invalidate_queue_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
@@ -501,6 +579,9 @@ void JellyfinSource::set_config(JellyfinConfig cfg) {
         const bool resume   = st == PlaybackState::playing || st == PlaybackState::buffering;
         cfg_                = std::move(cfg);
         target_playlist_.clear();
+        retry_pending_ = false;
+        track_retry_attempt_ = consecutive_failed_ = 0;
+        recovery_ = {};
         invalidate_queue_locked();
         discard_prefetch_locked();
         stop_pipe_locked();
@@ -567,6 +648,11 @@ TrackInfo JellyfinSource::current_track() const {
     return info;
 }
 
+RecoveryStatus JellyfinSource::recovery_status() const {
+    std::scoped_lock lk{mu_};
+    return recovery_;
+}
+
 AuthState JellyfinSource::auth_state() const noexcept {
     std::scoped_lock lk{mu_};
     return config_complete(cfg_) ? AuthState::authenticated : AuthState::needs_auth;
@@ -579,6 +665,14 @@ void JellyfinSource::pump(RingBuffer& ring) {
     }
 
     std::scoped_lock lk{mu_};
+    if (retry_pending_) {
+        if (std::chrono::steady_clock::now() < retry_at_) return;
+        retry_pending_ = false;
+        start_pipe_locked();
+        if (!pipe_ && !queue_scanning_)
+            handle_stream_failure_locked("Could not restart the current Jellyfin track.");
+        return;
+    }
     Pipe* p = pipe_.get();
     if (!p) return;
 
@@ -593,11 +687,25 @@ void JellyfinSource::pump(RingBuffer& ring) {
             p->read_pipe = nullptr;
         }
         p->ended = true;
+        if (p->bytes_written == 0)
+            handle_stream_failure_locked("The Jellyfin stream produced no audio.");
     };
 
     if (p->ended) {
         update_position();
-        if (ring.readable() == 0) advance_locked(+1);
+        if (ring.readable() == 0) {
+            const std::uint64_t duration_ms = p->for_queue_idx < queue_.size()
+                                                  ? queue_[p->for_queue_idx].duration_ms
+                                                  : 0;
+            if (stream_ended_early(p->bytes_written, duration_ms)) {
+                handle_stream_failure_locked("The Jellyfin stream ended before the track finished.");
+            } else {
+                retry_pending_ = false;
+                track_retry_attempt_ = consecutive_failed_ = 0;
+                recovery_ = {};
+                advance_locked(+1);
+            }
+        }
         return;
     }
     if (!p->read_pipe) return;
@@ -619,13 +727,22 @@ void JellyfinSource::pump(RingBuffer& ring) {
         DWORD got = 0;
         if (!ReadFile(p->read_pipe, buf, (DWORD)want, &got, nullptr) || got == 0) {
             on_eof();
-            break;
+            return;
         }
         const DWORD aligned = (got / 4u) * 4u;
+        if (aligned && p->bytes_written == 0 && recovery_.retrying) {
+            recovery_.retrying = false;
+            recovery_.message = "Playback resumed after a stream interruption.";
+        }
         if (aligned) eq_.process(reinterpret_cast<int16_t*>(buf), aligned / 4u);
         ring.write(buf, aligned);
         p->bytes_written += aligned;
+        p->last_data_at = std::chrono::steady_clock::now();
         avail             = avail > got ? avail - got : 0;
+    }
+    if (avail == 0 && std::chrono::steady_clock::now() - p->last_data_at >= kStreamStallTimeout) {
+        on_eof();
+        return;
     }
     update_position();
     maybe_spawn_prefetch_locked();
@@ -647,6 +764,9 @@ void JellyfinSource::set_active_station(std::string name) {
 
     cfg_.active_station = std::move(name);
     target_playlist_.clear();
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     invalidate_queue_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
@@ -696,6 +816,9 @@ JellyfinSource::QueueStatus JellyfinSource::queue_status() const {
 bool JellyfinSource::jump_to(std::size_t index) {
     std::scoped_lock lk{mu_};
     if (index >= queue_.size()) return false;
+    retry_pending_ = false;
+    track_retry_attempt_ = consecutive_failed_ = 0;
+    recovery_ = {};
     current_idx_ = index;
     if (!promote_prefetch_locked(current_idx_)) start_pipe_locked();
     sync_play_state_locked();

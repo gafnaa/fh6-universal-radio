@@ -8,6 +8,7 @@
 #include "fh6/worker/worker_client.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -99,6 +100,7 @@ public:
     PlaybackState playback_state() const noexcept override {
         return state_.load(std::memory_order_acquire);
     }
+    RecoveryStatus recovery_status() const override;
     AuthState auth_state() const noexcept override;
     SourceCapabilities capabilities() const noexcept override { return {false, true, true}; }
 
@@ -113,6 +115,7 @@ private:
     std::unique_ptr<Pipe> spawn_pipe_locked(std::size_t for_idx);
     void start_pipe_locked();
     void stop_pipe_locked();
+    void handle_stream_failure_locked(std::string message);
     void discard_prefetch_locked() noexcept;
     bool promote_prefetch_locked(std::size_t expected_idx);
     void maybe_spawn_prefetch_locked();
@@ -136,6 +139,11 @@ private:
     BackgroundWorker resolver_{"jellyfin-queue"};
     std::unique_ptr<Pipe> pipe_;
     std::unique_ptr<Pipe> prefetch_;
+    int consecutive_failed_ = 0;
+    int track_retry_attempt_ = 0;
+    bool retry_pending_ = false;
+    std::chrono::steady_clock::time_point retry_at_{};
+    RecoveryStatus recovery_{};
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 
     EqualizerStage eq_;

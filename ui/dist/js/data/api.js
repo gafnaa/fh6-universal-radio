@@ -46,6 +46,11 @@ export const api = {
 	getExternalAudio: () => request("/api/external_audio/devices"),
 	putExternalAudio: config => request("/api/external_audio/config", { method: "PUT", body: config }),
 	getDeps: () => request("/api/deps"),
+	getPlaybackHistory: () => request("/api/history"),
+	addPlaybackHistory: entry => request("/api/history", { method: "POST", body: { entry } }),
+	importPlaybackHistory: entries =>
+		request("/api/history/import", { method: "POST", body: { entries } }),
+	clearPlaybackHistory: () => request("/api/history", { method: "DELETE" }),
 
 	// Local Files
 	browseFs: path => request("/api/fs/browse", { method: "POST", body: { path: path || "" } }),

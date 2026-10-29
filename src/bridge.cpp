@@ -190,16 +190,17 @@ void run_bridge(HMODULE self) noexcept {
             mgr.unregister_source("local_files");
         }
         if (c.youtube_music.enabled && !mgr.find("youtube_music")) {
-            auto src = std::make_unique<sources::YouTubeMusicSource>(c.youtube_music,
-                                                                     c.general.ffmpeg_path,
-                                                                     worker.get());
+            auto src = std::make_unique<sources::YouTubeMusicSource>(
+                c.youtube_music, c.general.ffmpeg_path, worker.get(),
+                data_dir / "youtube-music-queue.json");
             if (src->initialize()) mgr.register_source(std::move(src));
         } else if (!c.youtube_music.enabled && mgr.find("youtube_music")) {
             mgr.unregister_source("youtube_music");
         }
         if (c.jellyfin.enabled && !mgr.find("jellyfin")) {
-            auto src = std::make_unique<sources::JellyfinSource>(c.jellyfin, c.general.ffmpeg_path,
-                                                                  worker.get());
+            auto src = std::make_unique<sources::JellyfinSource>(
+                c.jellyfin, c.general.ffmpeg_path, worker.get(),
+                data_dir / "jellyfin-queue.json");
             if (src->initialize()) mgr.register_source(std::move(src));
         } else if (!c.jellyfin.enabled && mgr.find("jellyfin")) {
             mgr.unregister_source("jellyfin");

@@ -79,6 +79,30 @@ describe("api endpoints", () => {
     });
   });
 
+  it("history endpoints read, add, import, and clear persisted playback history", async () => {
+    const entry = { key: "yt\\u0000artist\\u0000song", source: "youtube_music", title: "Song" };
+
+    await api.getPlaybackHistory();
+    expect(lastCall()).toMatchObject({ path: "/api/history", method: "GET" });
+
+    await api.addPlaybackHistory(entry);
+    expect(lastCall()).toMatchObject({
+      path: "/api/history",
+      method: "POST",
+      body: { entry },
+    });
+
+    await api.importPlaybackHistory([entry]);
+    expect(lastCall()).toMatchObject({
+      path: "/api/history/import",
+      method: "POST",
+      body: { entries: [entry] },
+    });
+
+    await api.clearPlaybackHistory();
+    expect(lastCall()).toMatchObject({ path: "/api/history", method: "DELETE" });
+  });
+
   it("putExternalAudio PUTs config payload", async () => {
     await api.putExternalAudio({ enabled: true, endpoint_id: "dev", media_session_id: "sess" });
     expect(lastCall()).toMatchObject({

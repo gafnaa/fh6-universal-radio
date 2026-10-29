@@ -33,7 +33,7 @@ export function renderNowPlaying(refs, state) {
     if (hasArt) {
         const isExternal = track.artwork_url.startsWith("http") && !isLocalUrl(track.artwork_url);
         src = isExternal
-            ? `https://wsrv.nl/?url=${encodeURIComponent(track.artwork_url)}`
+            ? `https://wsrv.nl/?url=${encodeURIComponent(track.artwork_url)}&w=512&h=512&fit=cover`
             : track.artwork_url;
 
         if (refs.img.getAttribute("src") !== src) {
@@ -50,15 +50,15 @@ export function renderNowPlaying(refs, state) {
             };
         }
     } else {
-        if (refs.img.getAttribute("src") !== "assets/default_artwork_2048.png") {
-            refs.img.src = "assets/default_artwork_2048.png";
+        if (refs.img.getAttribute("src") !== "assets/default_artwork_512.png") {
+            refs.img.src = "assets/default_artwork_512.png";
         }
         if (!track.title) {
             document.body.style.setProperty("--accent", "var(--color-sunset-yellow)");
         }
     }
 
-    if (refs.backdrop) refs.backdrop.style.backgroundImage = hasArt ? `url("${track.artwork_url}")` : "";
+    if (refs.backdrop) refs.backdrop.style.backgroundImage = hasArt ? `url("${src}")` : "";
 
     const title = translateBackendLiteral(translateLoadingPlaceholder(track.title, t), t);
     const artist = translateBackendLiteral(translateLoadingPlaceholder(track.artist, t), t);
@@ -85,7 +85,7 @@ export function renderNowPlaying(refs, state) {
             if (refs.mini.art.getAttribute("src") !== src) {
                 refs.mini.art.src = src;
             }
-        } else {
+        } else if (refs.mini.art.getAttribute("src") !== "assets/default_artwork_128.png") {
             refs.mini.art.src = "assets/default_artwork_128.png";
         }
 

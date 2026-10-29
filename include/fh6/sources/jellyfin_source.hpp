@@ -35,7 +35,8 @@ struct JellyfinTrack {
 class JellyfinSource final : public IAudioSource {
 public:
     JellyfinSource(JellyfinConfig cfg, std::filesystem::path ffmpeg_path,
-                   worker::WorkerClient* worker = nullptr);
+                   worker::WorkerClient* worker = nullptr,
+                   std::filesystem::path queue_state_file = {});
     ~JellyfinSource() override;
 
     std::string_view name() const noexcept override { return "jellyfin"; }
@@ -116,6 +117,8 @@ private:
     void start_pipe_locked();
     void stop_pipe_locked();
     void handle_stream_failure_locked(std::string message);
+    void load_queue_state_locked();
+    void persist_queue_state_locked() const;
     void discard_prefetch_locked() noexcept;
     bool promote_prefetch_locked(std::size_t expected_idx);
     void maybe_spawn_prefetch_locked();
@@ -126,6 +129,7 @@ private:
 
     JellyfinConfig cfg_;
     std::filesystem::path ffmpeg_path_;
+    std::filesystem::path queue_state_file_;
     worker::WorkerClient* worker_;
 
     mutable std::mutex mu_;

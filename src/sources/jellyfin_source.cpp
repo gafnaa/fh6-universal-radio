@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <random>
 #include <string>
@@ -183,8 +184,10 @@ struct JellyfinSource::Pipe {
 };
 
 JellyfinSource::JellyfinSource(JellyfinConfig cfg, std::filesystem::path ffmpeg_path,
-                               worker::WorkerClient* worker)
-    : cfg_{std::move(cfg)}, ffmpeg_path_{std::move(ffmpeg_path)}, worker_{worker} {}
+                               worker::WorkerClient* worker,
+                               std::filesystem::path queue_state_file)
+    : cfg_{std::move(cfg)}, ffmpeg_path_{std::move(ffmpeg_path)},
+      queue_state_file_{std::move(queue_state_file)}, worker_{worker} {}
 
 JellyfinSource::~JellyfinSource() {
     {
@@ -203,10 +206,100 @@ bool JellyfinSource::initialize() {
     std::scoped_lock lk{mu_};
     if (cfg_.active_station.empty() && !cfg_.stations.empty())
         cfg_.active_station = cfg_.stations.front().name;
+    load_queue_state_locked();
     // Populate the queue without blocking startup; the scan runs on the
     // resolver thread and the dashboard can already issue requests.
     ensure_queue_locked();
     return true;
+}
+
+void JellyfinSource::load_queue_state_locked() {
+    if (queue_state_file_.empty()) return;
+    std::ifstream input{queue_state_file_, std::ios::binary};
+    if (!input) return;
+
+    try {
+        const auto saved = nlohmann::json::parse(input);
+        if (saved.value("version", 0) != 1 ||
+            saved.value("server_url", std::string{}) != cfg_.server_url ||
+            saved.value("user_id", std::string{}) != cfg_.user_id)
+            return;
+        const auto saved_target = saved.value("target_playlist", std::string{});
+        const auto saved_station = saved.value("active_station", std::string{});
+        if (saved_target.empty() && saved_station != cfg_.active_station) return;
+        const auto entries = saved.find("entries");
+        if (entries == saved.end() || !entries->is_array() || entries->empty() ||
+            entries->size() > 10'000)
+            return;
+
+        std::vector<JellyfinTrack> restored;
+        restored.reserve(entries->size());
+        for (const auto& entry : *entries) {
+            if (!entry.is_object()) return;
+            JellyfinTrack track;
+            track.id = entry.value("id", std::string{});
+            track.title = entry.value("title", std::string{});
+            track.artist = entry.value("artist", std::string{});
+            track.album = entry.value("album", std::string{});
+            track.image_tag = entry.value("image_tag", std::string{});
+            track.duration_ms = entry.value("duration_ms", std::uint64_t{});
+            track.original_index = entry.value("original_index", restored.size());
+            if (track.id.empty() || track.id.size() > 256 || track.title.size() > 512 ||
+                track.artist.size() > 512 || track.album.size() > 512 ||
+                track.image_tag.size() > 256)
+                return;
+            restored.push_back(std::move(track));
+        }
+
+        target_playlist_ = saved_target;
+        queue_ = std::move(restored);
+        current_idx_ = std::min(saved.value("cursor", std::size_t{}), queue_.size() - 1);
+        queue_built_for_ = saved.value("queue_built_for", std::string{});
+        queue_error_.clear();
+        log::info("[jellyfin] restored saved queue ({}/{} tracks)", current_idx_ + 1,
+                  queue_.size());
+    } catch (const std::exception& e) {
+        log::warn("[jellyfin] ignored invalid saved queue: {}", e.what());
+    }
+}
+
+void JellyfinSource::persist_queue_state_locked() const {
+    if (queue_state_file_.empty()) return;
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& track : queue_) {
+        entries.push_back({{"id", track.id}, {"title", track.title}, {"artist", track.artist},
+                           {"album", track.album}, {"image_tag", track.image_tag},
+                           {"duration_ms", track.duration_ms},
+                           {"original_index", track.original_index}});
+    }
+    const nlohmann::json saved{
+        {"version", 1},
+        {"server_url", cfg_.server_url},
+        {"user_id", cfg_.user_id},
+        {"active_station", cfg_.active_station},
+        {"target_playlist", target_playlist_},
+        {"queue_built_for", queue_built_for_},
+        {"cursor", current_idx_},
+        {"entries", std::move(entries)},
+    };
+    std::error_code ec;
+    std::filesystem::create_directories(queue_state_file_.parent_path(), ec);
+    if (ec) {
+        log::warn("[jellyfin] could not create queue-state directory: {}", ec.message());
+        return;
+    }
+    auto temp = queue_state_file_;
+    temp += ".tmp";
+    const auto contents = saved.dump(2);
+    {
+        std::ofstream output{temp, std::ios::binary | std::ios::trunc};
+        if (!output) return;
+        output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        if (!output) return;
+    }
+    if (!MoveFileExW(temp.c_str(), queue_state_file_.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        log::warn("[jellyfin] could not save queue state (Windows error {})", GetLastError());
 }
 
 void JellyfinSource::shutdown() noexcept {
@@ -413,6 +506,7 @@ void JellyfinSource::start_pipe_locked() {
     if (!ensure_queue_locked()) return; // scan running; state is set by the caller
     if (queue_.empty()) return;
     if (current_idx_ >= queue_.size()) current_idx_ = 0;
+    persist_queue_state_locked();
     pipe_ = spawn_pipe_locked(current_idx_);
     if (pipe_) {
         state_.store(PlaybackState::buffering, std::memory_order_release);
@@ -504,6 +598,7 @@ void JellyfinSource::advance_locked(std::ptrdiff_t step) {
     const auto n = (std::ptrdiff_t)queue_.size();
     auto i       = (std::ptrdiff_t)current_idx_ + step;
     current_idx_ = (std::size_t)(((i % n) + n) % n);
+    persist_queue_state_locked();
     if (step == 1 && promote_prefetch_locked(current_idx_)) {
         // Promoted: pipe_ is the pre-warmed pipeline, no fresh spawn needed.
     } else {
@@ -562,6 +657,7 @@ bool JellyfinSource::cast(std::string playlist_id, bool use_favorites) {
     track_retry_attempt_ = consecutive_failed_ = 0;
     recovery_ = {};
     invalidate_queue_locked();
+    persist_queue_state_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
     start_pipe_locked(); // kicks the background fetch and buffers
@@ -584,6 +680,7 @@ void JellyfinSource::set_config(JellyfinConfig cfg) {
         track_retry_attempt_ = consecutive_failed_ = 0;
         recovery_ = {};
         invalidate_queue_locked();
+        persist_queue_state_locked();
         discard_prefetch_locked();
         stop_pipe_locked();
         if (resume) {
@@ -770,6 +867,7 @@ void JellyfinSource::set_active_station(std::string name) {
     track_retry_attempt_ = consecutive_failed_ = 0;
     recovery_ = {};
     invalidate_queue_locked();
+    persist_queue_state_locked();
     discard_prefetch_locked();
     stop_pipe_locked();
     if (resume) {
@@ -822,6 +920,7 @@ bool JellyfinSource::jump_to(std::size_t index) {
     track_retry_attempt_ = consecutive_failed_ = 0;
     recovery_ = {};
     current_idx_ = index;
+    persist_queue_state_locked();
     if (!promote_prefetch_locked(current_idx_)) start_pipe_locked();
     sync_play_state_locked();
     return true;
@@ -837,6 +936,7 @@ bool JellyfinSource::move_queue_entry(std::size_t from, std::size_t to) {
     queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(from));
     queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(to), std::move(entry));
     discard_prefetch_locked();
+    persist_queue_state_locked();
     return true;
 }
 
@@ -845,6 +945,7 @@ bool JellyfinSource::remove_queue_entry(std::size_t index) {
     if (index >= queue_.size() || index <= current_idx_) return false;
     queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(index));
     discard_prefetch_locked();
+    persist_queue_state_locked();
     return true;
 }
 
@@ -862,6 +963,7 @@ void JellyfinSource::set_shuffle(bool shuffle) {
             return a.original_index < b.original_index;
         });
     }
+    persist_queue_state_locked();
 }
 
 } // namespace fh6::sources

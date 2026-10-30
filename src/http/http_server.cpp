@@ -705,10 +705,14 @@ void send_response(SOCKET client, int code, std::string_view body,
                    std::string_view content_type = "application/json",
                    std::string_view extra_headers = {}) {
     std::ostringstream resp;
-    resp << "HTTP/1.1 " << code << ' ' << status_text(code) << "\r\n"
-         << "Content-Type: " << content_type << "\r\n"
-         << "Content-Length: " << body.size() << "\r\n"
-         << "Access-Control-Allow-Origin: *\r\n"
+    resp << "HTTP/1.1 " << code << ' ' << status_text(code) << "\r\n";
+    // A 304 has no body; sending Content-Type/Content-Length: 0 would claim the
+    // resource is empty, so both are omitted.
+    if (code != 304) {
+        resp << "Content-Type: " << content_type << "\r\n"
+             << "Content-Length: " << body.size() << "\r\n";
+    }
+    resp << "Access-Control-Allow-Origin: *\r\n"
          << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
          << "Access-Control-Allow-Headers: Content-Type, If-None-Match\r\n"
          << extra_headers << "Connection: close\r\n\r\n";

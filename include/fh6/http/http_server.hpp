@@ -17,7 +17,9 @@ namespace fh6::http {
 
 // Loopback-wildcard HTTP server (raw Winsock, small worker pool). All routes
 // are CORS-enabled. Expensive work (playlist scans, OAuth, Jellyfin fetches)
-// runs off the accept loop so dashboard controls stay responsive.
+// runs off the accept loop so dashboard controls stay responsive. Static
+// assets carry an ETag, and /api/events is a real SSE stream served by a
+// dedicated broadcaster thread, so an idle dashboard transfers nothing.
 //
 //   GET  /api/state                       unified live state
 //   GET  /api/events                      SSE stream of /api/state snapshots
@@ -28,7 +30,7 @@ namespace fh6::http {
 //
 //   POST /api/source/youtube_music/cast     body {"url":"..."}
 //   POST /api/source/youtube_music/search   body {"query":"..."}
-//   POST /api/source/youtube_music/queue/add body {"id":"...","title":"...","artist":"..."}
+//   POST /api/source/youtube_music/queue/add body {"id":"...","title":"...","artist":"...","play_next":false}
 //   POST /api/source/youtube_music/shuffle  body {"shuffle":true|false}
 //   GET  /api/source/youtube_music/oauth/status
 //   POST /api/source/youtube_music/oauth/start

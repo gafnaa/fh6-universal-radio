@@ -620,7 +620,7 @@ YouTubeMusicSource::search_songs(std::string query, std::string& error) const {
 }
 
 bool YouTubeMusicSource::add_search_result(std::string id, std::string title, std::string artist,
-                                           std::string& error) {
+                                           std::string& error, bool play_next) {
     error.clear();
     if (id.empty() || id.size() > 64 ||
         !std::all_of(id.begin(), id.end(), [](unsigned char c) {
@@ -657,8 +657,15 @@ bool YouTubeMusicSource::add_search_result(std::string id, std::string title, st
         queue_idx_ = 0;
         queue_error_.clear();
     }
-    queue_.push_back({url, title.empty() ? "Untitled video" : std::move(title),
-                      std::move(artist), queue_.size()});
+    InternalQueueEntry entry{url, title.empty() ? "Untitled video" : std::move(title),
+                             std::move(artist), queue_.size()};
+    if (play_next && !was_empty) {
+        // Slot it right after the current track instead of at the end.
+        queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(queue_idx_ + 1),
+                      std::move(entry));
+    } else {
+        queue_.push_back(std::move(entry));
+    }
     discard_prefetch_locked();
 
     if (was_empty) start_pipe_locked();

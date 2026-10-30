@@ -3,6 +3,25 @@ import { icons } from "../icons.js";
 import { t } from "../i18n.js";
 import { translateLoadingPlaceholder } from "../lib/format.js";
 
+// Playlists can hold thousands of entries. Building a <li> (with cover <img>)
+// for every one of them makes the first paint and every re-render expensive,
+// so rows are rendered in chunks: enough to fill the visible list plus a
+// scroll's worth of look-ahead, with a "show more" row extending the window.
+const CHUNK = 150;
+
+// Per-list render state, so re-rendering (every state tick) keeps the user's
+// expanded window instead of collapsing back to the first chunk.
+const listState = new WeakMap();
+
+function stateFor(trackList) {
+    let s = listState.get(trackList);
+    if (!s) {
+        s = { limit: CHUNK, key: "" };
+        listState.set(trackList, s);
+    }
+    return s;
+}
+
 /**
  * Renders a shared track-queue UI used by Local Files, YouTube Music, and Jellyfin.
  * Each source has slightly different track shapes, so the caller provides small
@@ -33,13 +52,30 @@ export function renderTrackQueue(trackList, queue, search, opts) {
         return terms.every(w => hay.includes(w));
     });
 
+    const state = stateFor(trackList);
+    // A new filter starts a fresh window; removing a track should not collapse
+    // a window the user has already expanded.
+    const windowKey = terms.join(" ");
+    if (windowKey !== state.key) {
+        state.key = windowKey;
+        state.limit = CHUNK;
+    }
+    if (state.limit > rows.length) state.limit = Math.max(CHUNK, rows.length);
+    // Always keep the current track inside the window, or the list would open
+    // on the wrong end of a long playlist.
+    const cursorRow = rows.findIndex(track => track.index === queue.cursor);
+    if (cursorRow >= state.limit) state.limit = Math.min(rows.length, cursorRow + CHUNK);
+
+    const visible = rows.slice(0, state.limit);
+    const hidden = rows.length - visible.length;
+
     const statusRow = queue.scanning
         ? el("li", { class: "queue-status muted" }, [el("span", { class: "spinner" }), t("label.queue_scanning")])
         : queue.error
             ? el("li", { class: "queue-status error" }, queue.error)
             : null;
 
-    const trackRows = rows.map(track => {
+    const trackRows = visible.map(track => {
         const coverUrl = opts.getCoverUrl(track) || "";
 
         const coverImg = el("img", {
@@ -118,10 +154,49 @@ export function renderTrackQueue(trackList, queue, search, opts) {
 
         li.addEventListener("click", () => opts.onTrackClick(track, track.index));
 
+        // Drag an upcoming row onto another to reorder. The current track and
+        // already-played rows are not draggable, matching the button rules.
+        if (canEdit && opts.onMoveTrack) {
+            li.draggable = true;
+            li.dataset.queueIndex = String(track.index);
+            li.addEventListener("dragstart", event => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", String(track.index));
+                li.classList.add("dragging");
+            });
+            li.addEventListener("dragend", () => li.classList.remove("dragging"));
+            li.addEventListener("dragover", event => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                li.classList.add("drop-target");
+            });
+            li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
+            li.addEventListener("drop", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                li.classList.remove("drop-target");
+                const from = Number(event.dataTransfer.getData("text/plain"));
+                if (!Number.isInteger(from) || from === track.index) return;
+                opts.onMoveTrack({ index: from }, track.index);
+            });
+        }
+
         return li;
     });
 
     trackList.replaceChildren(...(statusRow ? [statusRow] : []), ...trackRows);
+
+    if (hidden > 0) {
+        const more = el("li", { class: "queue-more" }, [
+            el("button", { type: "button", class: "btn ghost" },
+                t("label.queue_show_more", { count: String(Math.min(hidden, CHUNK)) })),
+        ]);
+        more.querySelector("button").addEventListener("click", () => {
+            state.limit += CHUNK;
+            renderTrackQueue(trackList, queue, search, opts);
+        });
+        trackList.append(more);
+    }
 
     if (!rows.length && !queue.scanning && !queue.error) {
         trackList.append(

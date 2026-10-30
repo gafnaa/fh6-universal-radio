@@ -87,13 +87,13 @@ public:
     QueueStatus queue_status() const;
     std::vector<SearchResult> search_songs(std::string query, std::string& error) const;
     bool add_search_result(std::string id, std::string title, std::string artist,
-                           std::string& error);
+                           std::string& error, bool play_next = false);
     bool jump_to(std::size_t index);
 
     // Edit the upcoming part of the queue (indices after the cursor). The
     // current track is never moved or removed.
-    bool move_queue_entry(std::size_t from, std::size_t to);
-    bool remove_queue_entry(std::size_t index);
+    bool move_queue_entry(std::size_t from, std::size_t to) override;
+    bool remove_queue_entry(std::size_t index) override;
 
     TrackInfo current_track() const override;
     PlaybackState playback_state() const noexcept override {

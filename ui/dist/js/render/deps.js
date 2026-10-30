@@ -46,6 +46,12 @@ export function createDeps(main) {
   }
 
   async function poll() {
+    // Downloads are the only thing that changes here, and they only ever run
+    // while the card is visible; skip the request entirely otherwise.
+    if (document.hidden) {
+      setTimeout(poll, 15000);
+      return;
+    }
     try {
       const r = await api.getDeps();
       tools = Array.isArray(r.tools) ? r.tools : [];
@@ -53,7 +59,9 @@ export function createDeps(main) {
     } catch {
       // keep last
     }
-    setTimeout(poll, tools.some(toolItem => toolItem.downloading) ? 1000 : 5000);
+    const downloading = tools.some(toolItem => toolItem.downloading);
+    // Idle tools never change, so back off hard instead of polling forever.
+    setTimeout(poll, downloading ? 1000 : 30000);
   }
 
   return { start: poll };

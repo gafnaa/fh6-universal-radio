@@ -62,8 +62,8 @@ export const api = {
 		...sourceApi("youtube_music"),
 		cast: url => request("/api/source/youtube_music/cast", { method: "POST", body: { url } }),
 		searchSongs: query => request("/api/source/youtube_music/search", { method: "POST", body: { query } }),
-		addSearchResult: result => request("/api/source/youtube_music/queue/add", {
-			method: "POST", body: { id: result.id, title: result.title, artist: result.artist },
+		addSearchResult: (result, opts = {}) => request("/api/source/youtube_music/queue/add", {
+			method: "POST", body: { id: result.id, title: result.title, artist: result.artist, ...opts },
 		}),
 		shuffle: shuffle => request("/api/source/youtube_music/shuffle", { method: "POST", body: { shuffle } }),
 		saveQueueAsStation: name =>

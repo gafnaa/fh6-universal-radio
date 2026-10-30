@@ -23,7 +23,10 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <fstream>
 #include <mutex>
@@ -534,13 +537,16 @@ void apply_patch(Config& c, const json& j) {
 
 struct Request {
     std::string method;
-    std::string path;
+    std::string path;  // as sent, query string included
+    std::string route; // path with the query string stripped
     std::string body;
+    std::string headers; // raw header block, for conditional requests
 };
 
 constexpr std::string_view status_text(int code) noexcept {
     switch (code) {
         case 200: return "OK";
+        case 304: return "Not Modified";
         case 400: return "Bad Request";
         case 403: return "Forbidden";
         case 404: return "Not Found";
@@ -586,6 +592,48 @@ size_t header_size_t(std::string_view headers, std::string_view name_lower) {
     return 0;
 }
 
+bool header_contains_token(std::string_view headers, std::string_view name_lower,
+                           std::string_view token_lower) {
+    for (size_t i = 0; i + name_lower.size() < headers.size(); ++i) {
+        bool match = true;
+        for (size_t k = 0; k < name_lower.size(); ++k) {
+            if (static_cast<char>(std::tolower(static_cast<unsigned char>(headers[i + k]))) !=
+                name_lower[k]) {
+                match = false;
+                break;
+            }
+        }
+        if (!match) continue;
+        size_t p = i + name_lower.size();
+        while (p < headers.size() && (headers[p] == ':' || headers[p] == ' ' || headers[p] == '\t'))
+            ++p;
+        const size_t end = headers.find("\r\n", p);
+        const auto value = headers.substr(p, end == std::string_view::npos ? std::string_view::npos
+                                                                          : end - p);
+        for (size_t j = 0; j + token_lower.size() <= value.size(); ++j) {
+            bool hit = true;
+            for (size_t k = 0; k < token_lower.size(); ++k) {
+                if (std::tolower(static_cast<unsigned char>(value[j + k])) != token_lower[k]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+// Weak-but-stable validator for a static file: size + mtime. Good enough for a
+// local dashboard, where editing a file always moves its mtime.
+std::string file_etag(std::uintmax_t size, std::filesystem::file_time_type mtime) {
+    const auto ticks = std::chrono::duration_cast<std::chrono::seconds>(mtime.time_since_epoch())
+                           .count();
+    return "\"" + std::to_string(static_cast<long long>(size)) + "-" +
+           std::to_string(static_cast<long long>(ticks)) + "\"";
+}
+
 bool read_request(SOCKET client, Request& req) {
     std::string raw;
     raw.reserve(1024);
@@ -602,8 +650,11 @@ bool read_request(SOCKET client, Request& req) {
 
     std::istringstream first{raw.substr(0, raw.find("\r\n"))};
     if (!(first >> req.method >> req.path)) return false;
+    req.route = req.path;
+    if (const auto q = req.route.find('?'); q != std::string::npos) req.route.resize(q);
 
-    const std::string_view headers{raw.data(), header_end};
+    req.headers.assign(raw, 0, header_end);
+    const std::string_view headers{req.headers};
     const size_t content_length = header_size_t(headers, "content-length");
     if (content_length > 1u << 20) return false; // 1 MiB body guard
 
@@ -625,27 +676,75 @@ void send_all(SOCKET client, std::string_view data) {
     }
 }
 
+// Same as send_all, but reports whether the whole buffer made it out so a
+// streaming caller can drop a stalled client instead of writing into a dead
+// socket forever.
+bool send_all_ok(SOCKET client, std::string_view data) {
+    while (!data.empty()) {
+        int n = send(client, data.data(), static_cast<int>(data.size()), 0);
+        if (n <= 0) return false;
+        data.remove_prefix(static_cast<size_t>(n));
+    }
+    return true;
+}
+
+// One HTTP/1.1 chunk. Server-sent events have no Content-Length, so the stream
+// is chunked; relying on "read until the socket closes" makes intermediaries
+// and some browsers buffer the events instead of delivering them live.
+bool send_chunk(SOCKET client, std::string_view payload) {
+    if (payload.empty()) return true;
+    char header[24];
+    const auto written = std::snprintf(header, sizeof(header), "%zx\r\n", payload.size());
+    if (written <= 0) return false;
+    if (!send_all_ok(client, std::string_view{header, static_cast<size_t>(written)})) return false;
+    if (!send_all_ok(client, payload)) return false;
+    return send_all_ok(client, "\r\n");
+}
+
 void send_response(SOCKET client, int code, std::string_view body,
-                   std::string_view content_type = "application/json") {
+                   std::string_view content_type = "application/json",
+                   std::string_view extra_headers = {}) {
     std::ostringstream resp;
     resp << "HTTP/1.1 " << code << ' ' << status_text(code) << "\r\n"
          << "Content-Type: " << content_type << "\r\n"
          << "Content-Length: " << body.size() << "\r\n"
          << "Access-Control-Allow-Origin: *\r\n"
          << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-         << "Access-Control-Allow-Headers: Content-Type\r\n"
-         << "Connection: close\r\n\r\n";
+         << "Access-Control-Allow-Headers: Content-Type, If-None-Match\r\n"
+         << extra_headers << "Connection: close\r\n\r\n";
     auto headers = resp.str();
     send_all(client, headers);
     send_all(client, body);
 }
 
-bool serve_file(SOCKET client, const std::filesystem::path& file) {
+// Serves a static dashboard asset. Revalidating requests that still match the
+// stored validator get a bodiless 304, which is what makes a dashboard reload
+// cheap: the browser keeps its cached JS/CSS/font bytes.
+bool serve_file(SOCKET client, const std::filesystem::path& file, const Request& req) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(file, ec);
+    if (ec) return false;
+
     std::ifstream f{file, std::ios::binary};
     if (!f) return false;
+
+    const auto mtime = std::filesystem::last_write_time(file, ec);
+    const auto etag  = file_etag(size, ec ? std::filesystem::file_time_type{} : mtime);
+
+    std::string extra;
+    extra.reserve(96);
+    extra.append("ETag: ").append(etag).append("\r\n");
+    // No max-age: the dashboard is revalidated on every load so a rebuilt
+    // dist/ shows up immediately, but unchanged files never re-transfer.
+    extra.append("Cache-Control: no-cache\r\n");
+    if (header_contains_token(req.headers, "if-none-match", etag)) {
+        send_response(client, 304, {}, mime_for(file.string()), extra);
+        return true;
+    }
+
     std::ostringstream buf;
     buf << f.rdbuf();
-    send_response(client, 200, buf.str(), mime_for(file.string()));
+    send_response(client, 200, buf.str(), mime_for(file.string()), extra);
     return true;
 }
 
@@ -742,6 +841,16 @@ struct HttpServer::Impl {
     std::atomic<bool> wsa_ready{false};
     std::atomic<bool> accept_done{false};
 
+    // Server-sent events: one broadcaster thread fans a single state snapshot
+    // out to every attached dashboard.
+    static constexpr std::size_t kMaxEventClients = 16;
+    static constexpr int kEventIntervalMs         = 1000;
+    std::mutex sse_mu_;
+    std::condition_variable sse_cv_;
+    std::vector<SOCKET> sse_clients_;
+    std::atomic<uint64_t> sse_join_count_{0};
+    std::thread broadcaster_;
+
     Impl(AudioSourceManager& m, fmod_bridge::DSPBridge& b, ConfigStore& s, DependencyManager& d,
          uint16_t port, std::filesystem::path dist, std::filesystem::path data_dir)
         : mgr{m}, bridge{b}, store{s}, deps{d}, ui_dist{std::move(dist)},
@@ -765,6 +874,8 @@ struct HttpServer::Impl {
         queue_cv_.notify_all();
         for (auto& w : workers_)
             if (w.joinable()) w.join();
+        sse_cv_.notify_all();
+        if (broadcaster_.joinable()) broadcaster_.join();
         if (wsa_ready.load(std::memory_order_acquire)) WSACleanup();
     }
 
@@ -946,6 +1057,7 @@ struct HttpServer::Impl {
         workers_.reserve(kWorkerCount);
         for (std::size_t i = 0; i < kWorkerCount; ++i)
             workers_.emplace_back([this] { worker_loop(); });
+        broadcaster_ = std::thread{[this] { broadcaster_loop(); }};
 
         while (!stopping.load(std::memory_order_acquire)) {
             fd_set rfds;
@@ -995,18 +1107,21 @@ struct HttpServer::Impl {
             setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
                        reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 
+            bool keep_open = false;
             try {
-                handle(client);
+                keep_open = handle(client);
             } catch (...) {
                 // A malformed request must not take a worker down.
             }
-            closesocket(client);
+            // /api/events hands the socket to the broadcaster thread, which
+            // owns it from here on.
+            if (!keep_open) closesocket(client);
         }
     }
 
-    void handle(SOCKET client) {
+    bool handle(SOCKET client) {
         Request req;
-        if (!read_request(client, req)) return;
+        if (!read_request(client, req)) return false;
 
         auto ok = [&](const json& j = {}) {
             std::string body = j.empty() ? std::string{R"({"ok":true})"}
@@ -1017,19 +1132,28 @@ struct HttpServer::Impl {
             send_response(client, code, json{{"error", std::string{msg}}}.dump());
         };
 
+        // Server-sent events are long-lived, so they never go through the
+        // request/response dispatch below.
+        if (req.method == "GET" && req.route == "/api/events") {
+            return start_event_stream(client);
+        }
+
         try {
             dispatch(client, req, ok, fail);
         } catch (...) {
             fail(400, "bad request body");
         }
+        return false;
     }
 
     template <class Ok, class Fail>
     void dispatch(SOCKET client, const Request& req, Ok&& ok, Fail&& fail) {
         const auto& m = req.method;
-        const auto& p = req.path;
+        const auto& p = req.route;
 
-        if (m == "GET" && p.starts_with("/?")) {
+        // The OAuth callback carries its parameters in the query string, so it
+        // matches on the raw path rather than the stripped route.
+        if (m == "GET" && req.path.starts_with("/?")) {
             sockaddr_in peer{};
             int peer_size = sizeof(peer);
             if (getpeername(client, reinterpret_cast<sockaddr*>(&peer), &peer_size) != 0 ||
@@ -1037,7 +1161,7 @@ struct HttpServer::Impl {
                 return send_response(client, 403, "This OAuth callback is only available on this PC.",
                                      "text/plain; charset=utf-8");
             }
-            const auto result = youtube_oauth.complete(p);
+            const auto result = youtube_oauth.complete(req.path);
             auto escape_html = [](std::string_view value) {
                 std::string out;
                 for (char c : value) {
@@ -1063,7 +1187,6 @@ struct HttpServer::Impl {
         if (m == "OPTIONS") return send_response(client, 200, "", "text/plain");
 
         if (m == "GET" && p == "/api/state") return ok(build_state());
-        if (m == "GET" && p == "/api/events") return send_event_snapshot(client);
         if (m == "GET" && p == "/api/history") return ok(playback_history_snapshot());
         if (m == "POST" && p == "/api/history") {
             const auto body = json::parse(req.body);
@@ -1313,7 +1436,8 @@ struct HttpServer::Impl {
             std::string error;
             if (!yt->add_search_result(body.value("id", std::string{}),
                                        body.value("title", std::string{}),
-                                       body.value("artist", std::string{}), error))
+                                       body.value("artist", std::string{}), error,
+                                       body.value("play_next", false)))
                 return fail(error == "That song is already in the queue." ? 409 : 400, error);
             mgr.switch_to("youtube_music");
             const auto status = yt->queue_status();
@@ -1383,7 +1507,7 @@ struct HttpServer::Impl {
                     const auto end = pos + playlist_param.size();
                     return end == station.url.size() || station.url[end] == '&';
                 });
-                if (!already_added) additions.push_back({playlist.title, url});
+                if (!already_added) additions.push_back({playlist.title, url, {}});
             }
             if (additions.empty()) return ok(json{{"imported", 0}});
             size_t imported = 0;
@@ -1739,27 +1863,111 @@ struct HttpServer::Impl {
 
         // SPA static-file fallback.
         if (m == "GET" && !ui_dist.empty()) {
-            const std::string rel = (p == "/") ? "index.html" : p.substr(1);
-            if (serve_file(client, ui_dist / rel)) return;
-            if (p.find('.') == std::string::npos && serve_file(client, ui_dist / "index.html"))
+            const std::string rel = (p == "/" || p.empty()) ? "index.html" : p.substr(1);
+            if (serve_file(client, ui_dist / rel, req)) return;
+            if (p.find('.') == std::string::npos && serve_file(client, ui_dist / "index.html", req))
                 return;
         }
         fail(404, "not found");
     }
 
-    void send_event_snapshot(SOCKET client) const {
-        auto body = build_state().dump(-1, ' ', false, json::error_handler_t::replace);
-        std::string evt;
-        evt.reserve(body.size() + 256);
-        evt.append("HTTP/1.1 200 OK\r\n"
-                   "Content-Type: text/event-stream\r\n"
-                   "Cache-Control: no-store\r\n"
-                   "Access-Control-Allow-Origin: *\r\n"
-                   "Connection: close\r\n\r\n"
-                   "retry: 1000\ndata: ");
-        evt.append(body);
-        evt.append("\n\n");
-        send_all(client, evt);
+    // --- Server-sent events -------------------------------------------------
+    // One broadcaster thread renders the state at a fixed cadence and pushes it
+    // to every attached dashboard, so N open tabs cost one snapshot per tick
+    // instead of N HTTP requests. Connections that stall are dropped.
+    bool start_event_stream(SOCKET client) {
+        // Check capacity first: rejecting after the 200 preamble would look
+        // like a broken stream and send the browser into a reconnect loop.
+        {
+            std::scoped_lock lk{sse_mu_};
+            if (sse_clients_.size() >= kMaxEventClients) return false;
+        }
+
+        const std::string preamble =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-store\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Connection: close\r\n\r\n";
+        if (!send_all_ok(client, preamble)) return false;
+        // Flush the retry hint as its own chunk so the browser starts with a
+        // known reconnect delay.
+        if (!send_chunk(client, "retry: 1000\n\n")) return false;
+
+        // A dashboard that stops reading must not stall the broadcaster for the
+        // full worker timeout.
+        DWORD timeout = 5'000;
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout),
+                   sizeof(timeout));
+
+        {
+            std::scoped_lock lk{sse_mu_};
+            if (stopping.load(std::memory_order_acquire)) return false;
+            if (sse_clients_.size() >= kMaxEventClients) return false;
+            sse_clients_.push_back(client);
+        }
+        sse_join_count_.fetch_add(1, std::memory_order_acq_rel);
+        sse_cv_.notify_all();
+        return true;
+    }
+
+    void broadcaster_loop() {
+        std::string last_sent;
+        uint64_t last_join_count = 0;
+        while (!stopping.load(std::memory_order_acquire)) {
+            {
+                std::unique_lock lk{sse_mu_};
+                // Fixed cadence: one state snapshot per tick no matter how many
+                // dashboards are attached. Newly attached clients bump the join
+                // counter, which forces the next tick to send immediately.
+                sse_cv_.wait_for(lk, std::chrono::milliseconds{kEventIntervalMs});
+                if (stopping.load(std::memory_order_acquire)) break;
+                if (sse_clients_.empty()) {
+                    last_sent.clear();
+                    continue;
+                }
+            }
+
+            const auto joins = sse_join_count_.load(std::memory_order_acquire);
+            auto body = build_state().dump(-1, ' ', false, json::error_handler_t::replace);
+            // Progress bars tick on the client from position_ms/duration_ms, so
+            // an identical snapshot does not need to be re-sent.
+            if (body == last_sent && joins == last_join_count) continue;
+            last_sent        = body;
+            last_join_count  = joins;
+
+            std::string frame;
+            frame.reserve(body.size() + 16);
+            frame.append("data: ");
+            frame.append(body);
+            frame.append("\n\n");
+
+            // Send outside the lock: a stalled socket can block for up to
+            // SO_SNDTIMEO, and start_event_stream() must not wait on that.
+            std::vector<SOCKET> targets;
+            {
+                std::scoped_lock lk{sse_mu_};
+                targets = sse_clients_;
+            }
+            std::vector<SOCKET> dead;
+            for (auto s : targets) {
+                if (!send_chunk(s, frame)) dead.push_back(s);
+            }
+            if (dead.empty()) continue;
+            {
+                std::scoped_lock lk{sse_mu_};
+                for (auto s : dead) {
+                    std::erase(sse_clients_, s);
+                    closesocket(s);
+                }
+            }
+        }
+
+        std::scoped_lock lk{sse_mu_};
+        for (auto s : sse_clients_) closesocket(s);
+        sse_clients_.clear();
     }
 };
 

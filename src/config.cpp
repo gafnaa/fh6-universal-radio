@@ -156,7 +156,7 @@ Config load_config(const std::filesystem::path& path) {
     if (cfg.youtube_music.stations.empty()) {
         auto dp = pick<std::string>(ym, "default_playlist", "");
         if (!dp.empty()) {
-            cfg.youtube_music.stations.push_back({"My Playlist", dp});
+            cfg.youtube_music.stations.push_back({"My Playlist", dp, {}});
         }
     }
     if (cfg.youtube_music.active_station.empty() && !cfg.youtube_music.stations.empty()) {
@@ -196,7 +196,7 @@ Config load_config(const std::filesystem::path& path) {
         auto dp = pick<std::string>(jf, "default_playlist", "");
         auto uf = pick<bool>(jf, "use_favorites", false);
         if (!dp.empty() || uf) {
-            cfg.jellyfin.stations.push_back({"My Playlist", dp, uf});
+            cfg.jellyfin.stations.push_back({"My Playlist", dp, uf, {}});
         }
     }
     if (cfg.jellyfin.active_station.empty() && !cfg.jellyfin.stations.empty()) {

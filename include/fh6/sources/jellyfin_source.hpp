@@ -88,8 +88,11 @@ public:
     QueueSnapshot queue_snapshot() const;
     QueueStatus queue_status() const;
     bool jump_to(std::size_t index);
-    bool move_queue_entry(std::size_t from, std::size_t to);
-    bool remove_queue_entry(std::size_t index);
+
+    // Edit the upcoming part of the queue (indices after the cursor). The
+    // current track is never moved or removed.
+    bool move_queue_entry(std::size_t from, std::size_t to) override;
+    bool remove_queue_entry(std::size_t index) override;
 
     // POST /api/source/jellyfin/cast: swap to a specific playlist id.
     // Returns false if the fetch fails (queue left untouched).

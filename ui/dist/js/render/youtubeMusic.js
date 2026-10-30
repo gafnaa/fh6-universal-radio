@@ -167,6 +167,9 @@ export function createYoutubeMusic(main, ctx) {
             const addBtn = el("button", {
                 type: "button", class: "btn filled", dataset: { i18n: "youtube_music.add_to_queue" },
             }, t("youtube_music.add_to_queue"));
+            const nextBtn = el("button", {
+                type: "button", class: "btn ghost", dataset: { i18n: "queue.play_next" },
+            }, t("queue.play_next"));
             playBtn.addEventListener("click", async () => {
                 playBtn.disabled = true;
                 try {
@@ -178,6 +181,19 @@ export function createYoutubeMusic(main, ctx) {
                     toast(e.message, true);
                 } finally {
                     playBtn.disabled = false;
+                }
+            });
+            nextBtn.addEventListener("click", async () => {
+                nextBtn.disabled = true;
+                try {
+                    await api.youtubeMusic.addSearchResult(result, { play_next: true });
+                    await ctx.onSaved?.();
+                    await station.loadQueue();
+                    toast(t("queue.playing_next", { title: result.title }));
+                } catch (e) {
+                    toast(e.message, true);
+                } finally {
+                    nextBtn.disabled = false;
                 }
             });
             addBtn.addEventListener("click", async () => {
@@ -203,7 +219,7 @@ export function createYoutubeMusic(main, ctx) {
                     el("strong", {}, result.title || t("label.unknown_title")),
                     details ? el("small", {}, details) : null,
                 ]),
-                el("div", { class: "youtube-search-result__actions" }, [playBtn, addBtn]),
+                el("div", { class: "youtube-search-result__actions" }, [playBtn, nextBtn, addBtn]),
             ]);
         }));
         searchResults.hidden = results.length === 0;
